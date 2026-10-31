@@ -1,12 +1,25 @@
 <?php
 
+declare(strict_types=1);
+
 namespace App\Enums;
 
 enum LotStatus: string
 {
-    case DRAFT = 'draft';
-    case ACTIVE = 'active';
-    case RESERVED = 'reserved';
-    case SOLD = 'sold';
-    case ARCHIVED = 'archived';
+    case Draft = 'draft';
+    case Active = 'active';
+    case Reserved = 'reserved';
+    case Sold = 'sold';
+    case Archived = 'archived';
+
+    public function label(): string
+    {
+        return match ($this) {
+            self::Draft => 'Черновик',
+            self::Active => 'Активен',
+            self::Reserved => 'Забронирован',
+            self::Sold => 'Продан',
+            self::Archived => 'В архиве',
+        };
+    }
 }

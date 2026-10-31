@@ -1,20 +1,29 @@
 <?php
 
+declare(strict_types=1);
+
 namespace App\Services;
 
+use App\Enums\OrderStatus;
+use App\Enums\TransactionType;
 use App\Models\Lot;
 use App\Models\Order;
 use App\Models\Review;
 use App\Models\User;
-use App\Models\WalletTransaction;
 use DomainException;
 use Illuminate\Support\Facades\DB;
 
 class EscrowService
 {
+    private const PLATFORM_FEE_RATE = 0.05; // Комиссия биржи SportPay 5%
+
+    public function __construct(
+        private readonly WalletService $walletService
+    ) {}
+
     public function purchaseLot(int $buyerId, int $lotId, int $quantity = 1): Order
     {
-        return DB::transaction(function () use ($buyerId, $lotId, $quantity) {
+        return DB::transaction(function () use ($buyerId, $lotId, $quantity): Order {
             $lot = Lot::where('id', $lotId)->lockForUpdate()->firstOrFail();
             $buyer = User::where('id', $buyerId)->lockForUpdate()->firstOrFail();
 
@@ -26,16 +35,9 @@ class EscrowService
                 throw new DomainException('Товара нет в нужном количестве.');
             }
 
-            $totalPrice = round($lot->price * $quantity, 2);
-
-            if ($buyer->wallet_balance < $totalPrice) {
-                throw new DomainException('Недостаточно средств на кошельке. Пополните баланс.');
-            }
+            $totalPrice = round((float) $lot->price * $quantity, 2);
 
             $lot->decrement('stock_quantity', $quantity);
-
-            $buyer->wallet_balance -= $totalPrice;
-            $buyer->save();
 
             $order = Order::create([
                 'lot_id' => $lot->id,
@@ -44,17 +46,15 @@ class EscrowService
                 'quantity' => $quantity,
                 'unit_price' => $lot->price,
                 'total_price' => $totalPrice,
-                'status' => 'paid',
+                'status' => OrderStatus::Paid,
             ]);
 
-            WalletTransaction::create([
-                'user_id' => $buyer->id,
-                'order_id' => $order->id,
-                'amount' => -$totalPrice,
-                'type' => 'purchase',
-                'balance_after' => $buyer->wallet_balance,
-                'status' => 'success',
-            ]);
+            $this->walletService->applyBalanceChange(
+                $buyer,
+                -$totalPrice,
+                TransactionType::Purchase,
+                $order->id
+            );
 
             return $order;
         });
@@ -62,45 +62,33 @@ class EscrowService
 
     public function confirmOrder(int $orderId, int $buyerId, ?int $rating = null, ?string $comment = null): Order
     {
-        return DB::transaction(function () use ($orderId, $buyerId, $rating, $comment) {
+        return DB::transaction(function () use ($orderId, $buyerId, $rating, $comment): Order {
             $order = Order::where('id', $orderId)->lockForUpdate()->firstOrFail();
 
             if ($order->buyer_id !== $buyerId) {
                 throw new DomainException('Только покупатель может подтвердить выполнение заказа.');
             }
 
-            $statusValue = is_object($order->status) ? $order->status->value : $order->status;
-            if (!in_array($statusValue, ['paid', 'shipped'], true)) {
+            if (!$order->status->isConfirmable()) {
                 throw new DomainException('Заказ уже закрыт или отменен.');
             }
 
             $seller = User::where('id', $order->seller_id)->lockForUpdate()->firstOrFail();
-            $seller->wallet_balance += $order->total_price;
-            $seller->save();
 
-            $order->update(['status' => 'completed']);
+            // Выплата продавцу за вычетом 5% комиссии платформы
+            $sellerPayout = round((float) $order->total_price * (1 - self::PLATFORM_FEE_RATE), 2);
 
-            WalletTransaction::create([
-                'user_id' => $seller->id,
-                'order_id' => $order->id,
-                'amount' => $order->total_price,
-                'type' => 'payout',
-                'balance_after' => $seller->wallet_balance,
-                'status' => 'success',
-            ]);
+            $order->update(['status' => OrderStatus::Completed]);
+
+            $this->walletService->applyBalanceChange(
+                $seller,
+                $sellerPayout,
+                TransactionType::Payout,
+                $order->id
+            );
 
             if ($rating !== null) {
-                Review::create([
-                    'order_id' => $order->id,
-                    'author_id' => $buyerId,
-                    'seller_id' => $seller->id,
-                    'lot_id' => $order->lot_id,
-                    'rating' => $rating,
-                    'comment' => $comment,
-                ]);
-
-                $avgRating = Review::where('seller_id', $seller->id)->avg('rating') ?? 5.00;
-                $seller->update(['rating' => round($avgRating, 2)]);
+                $this->recordReview($order, $buyerId, $seller, $rating, $comment);
             }
 
             return $order;
@@ -109,31 +97,41 @@ class EscrowService
 
     public function cancelAndRefundOrder(int $orderId): Order
     {
-        return DB::transaction(function () use ($orderId) {
+        return DB::transaction(function () use ($orderId): Order {
             $order = Order::where('id', $orderId)->lockForUpdate()->firstOrFail();
 
-            $statusValue = is_object($order->status) ? $order->status->value : $order->status;
-            if (!in_array($statusValue, ['paid', 'shipped'], true)) {
+            if (!$order->status->isConfirmable()) {
                 throw new DomainException('Невозможно вернуть средства по завершенному заказу.');
             }
 
             $buyer = User::where('id', $order->buyer_id)->lockForUpdate()->firstOrFail();
-            $buyer->wallet_balance += $order->total_price;
-            $buyer->save();
 
             Lot::where('id', $order->lot_id)->increment('stock_quantity', $order->quantity);
-            $order->update(['status' => 'cancelled']);
+            $order->update(['status' => OrderStatus::Cancelled]);
 
-            WalletTransaction::create([
-                'user_id' => $buyer->id,
-                'order_id' => $order->id,
-                'amount' => $order->total_price,
-                'type' => 'deposit',
-                'balance_after' => $buyer->wallet_balance,
-                'status' => 'success',
-            ]);
+            $this->walletService->applyBalanceChange(
+                $buyer,
+                (float) $order->total_price,
+                TransactionType::Deposit,
+                $order->id
+            );
 
             return $order;
         });
+    }
+
+    private function recordReview(Order $order, int $buyerId, User $seller, int $rating, ?string $comment): void
+    {
+        Review::create([
+            'order_id' => $order->id,
+            'author_id' => $buyerId,
+            'seller_id' => $seller->id,
+            'lot_id' => $order->lot_id,
+            'rating' => $rating,
+            'comment' => $comment ?: 'Сделка прошла отлично!',
+        ]);
+
+        $avgRating = Review::where('seller_id', $seller->id)->avg('rating') ?? 5.00;
+        $seller->update(['rating' => round((float) $avgRating, 2)]);
     }
 }

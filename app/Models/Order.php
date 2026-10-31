@@ -1,12 +1,13 @@
 <?php
 
+declare(strict_types=1);
+
 namespace App\Models;
 
 use App\Enums\OrderStatus;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Order extends Model
@@ -48,13 +49,12 @@ class Order extends Model
         return $this->belongsTo(User::class, 'seller_id');
     }
 
-    public function walletTransactions(): HasMany
-    {
-        return $this->hasMany(WalletTransaction::class, 'order_id');
-    }
-
     public function review(): HasOne
     {
         return $this->hasOne(Review::class, 'order_id');
+    }
+    public function messages(): \Illuminate\Database\Eloquent\Relations\HasMany
+    {
+        return $this->hasMany(Message::class, 'order_id')->oldest();
     }
 }

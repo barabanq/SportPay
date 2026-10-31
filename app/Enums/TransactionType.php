@@ -1,11 +1,23 @@
 <?php
 
+declare(strict_types=1);
+
 namespace App\Enums;
 
 enum TransactionType: string
 {
-    case DEPOSIT = 'deposit';
-    case WITHDRAW = 'withdraw';
-    case PURCHASE = 'purchase';
-    case PAYOUT = 'payout';
+    case Deposit = 'deposit';
+    case Withdraw = 'withdraw';
+    case Purchase = 'purchase';
+    case Payout = 'payout';
+
+    public function label(): string
+    {
+        return match ($this) {
+            self::Deposit => 'ПОПОЛНЕНИЕ',
+            self::Withdraw => 'ВЫВОД',
+            self::Purchase => 'ПОКУПКА (ХОЛД)',
+            self::Payout => 'ВЫПЛАТА С ПРОДАЖИ',
+        };
+    }
 }
