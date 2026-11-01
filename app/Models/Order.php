@@ -8,6 +8,7 @@ use App\Enums\OrderStatus;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Order extends Model
@@ -53,8 +54,24 @@ class Order extends Model
     {
         return $this->hasOne(Review::class, 'order_id');
     }
-    public function messages(): \Illuminate\Database\Eloquent\Relations\HasMany
+
+    public function messages(): HasMany
     {
         return $this->hasMany(Message::class, 'order_id')->oldest();
+    }
+
+    public function latestMessage(): HasOne
+    {
+        return $this->hasOne(Message::class, 'order_id')->latestOfMany();
+    }
+
+    public function isParticipant(User $user): bool
+    {
+        return $this->buyer_id === $user->id || $this->seller_id === $user->id;
+    }
+
+    public function counterpartyFor(User $user): User
+    {
+        return $this->buyer_id === $user->id ? $this->seller : $this->buyer;
     }
 }

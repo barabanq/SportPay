@@ -6,9 +6,12 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\ConfirmOrderRequest;
 use App\Models\Lot;
+use App\Models\Message;
 use App\Models\Order;
+use App\Models\User;
 use App\Services\EscrowService;
 use DomainException;
+use Illuminate\Contracts\View\View;
 use Illuminate\Http\RedirectResponse;
 
 class OrderController extends Controller
@@ -17,38 +20,65 @@ class OrderController extends Controller
         private readonly EscrowService $escrowService
     ) {}
 
+    public function show(Order $order): View
+    {
+        $user =$this->currentUser();
+
+        if (!$order->isParticipant($user)) {
+            abort(403, 'Доступ запрещен: вы не являетесь участником этой сделки.');
+        }
+
+        // Отмечаем входящие сообщения в этом заказе как прочитанные
+        Message::where('order_id', $order->id)
+            ->where('user_id', '!=', $user->id)
+            ->whereNull('read_at')
+            ->update(['read_at' => now()]);
+
+        $order->load(['lot', 'buyer', 'seller', 'review', 'messages.user']);
+
+        return view('orders.show', [
+            'user' => $user,
+            'allUsers' => User::orderBy('id')->get(),
+            'order' => $order,
+        ]);
+    }
+
     public function purchase(Lot $lot): RedirectResponse
     {
         try {
-            $order = $this->escrowService->purchaseLot($this->currentUser()->id, $lot->id);
-            return redirect()->route('home')->with('success', "Заказ #{$order->id} оплачен! Деньги зарезервированы гарантом.");
+            $order =$this->escrowService->purchaseLot($this->currentUser()->id,$lot->id);
+            return redirect()
+                ->route('orders.show', $order)
+                ->with('success', "Заказ #{$order->id} оплачен! Обсудите детали передачи с продавцом в чате.");
         } catch (DomainException $e) {
             return redirect()->route('home')->with('error', $e->getMessage());
         }
     }
 
-    public function confirm(ConfirmOrderRequest $request, Order $order): RedirectResponse
+    public function confirm(ConfirmOrderRequest $request, Order$order): RedirectResponse
     {
         try {
             $this->escrowService->confirmOrder(
-                $order->id,
-                $this->currentUser()->id,
-                $request->integer('rating', 5),
-                $request->input('comment')
+                $order->id,$this->currentUser()->id,
+                $request->integer('rating', 5),$request->input('comment')
             );
-            return redirect()->route('home')->with('success', "Заказ #{$order->id} подтвержден! Выплата (за вычетом 5% комиссии) отправлена продавцу.");
+            return redirect()
+                ->route('orders.show', $order)
+                ->with('success', "Заказ #{$order->id} подтвержден! Деньги переведены продавцу.");
         } catch (DomainException $e) {
-            return redirect()->route('home')->with('error', $e->getMessage());
+            return back()->with('error', $e->getMessage());
         }
     }
 
     public function cancel(Order $order): RedirectResponse
     {
         try {
-            $this->escrowService->cancelAndRefundOrder($order->id);
-            return redirect()->route('home')->with('success', "Заказ #{$order->id} отменен. Средства возвращены покупателю.");
+            $this->escrowService->cancelAndRefundOrder($order->id,$this->currentUser()->id);
+            return redirect()
+                ->route('orders.show', $order)
+                ->with('success', "Заказ #{$order->id} отменен. Средства возвращены покупателю.");
         } catch (DomainException $e) {
-            return redirect()->route('home')->with('error', $e->getMessage());
+            return back()->with('error', $e->getMessage());
         }
     }
 }

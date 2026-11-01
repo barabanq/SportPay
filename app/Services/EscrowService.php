@@ -7,6 +7,7 @@ namespace App\Services;
 use App\Enums\OrderStatus;
 use App\Enums\TransactionType;
 use App\Models\Lot;
+use App\Models\Message;
 use App\Models\Order;
 use App\Models\Review;
 use App\Models\User;
@@ -15,7 +16,7 @@ use Illuminate\Support\Facades\DB;
 
 class EscrowService
 {
-    private const PLATFORM_FEE_RATE = 0.05; // Комиссия биржи SportPay 5%
+    private const PLATFORM_FEE_RATE = 0.05;
 
     public function __construct(
         private readonly WalletService $walletService
@@ -56,6 +57,12 @@ class EscrowService
                 $order->id
             );
 
+            $this->logSystemMessage(
+                $order,
+                $buyer->id,
+                "Покупатель {$buyer->username} оплатил заказ. Средства ({$totalPrice} ₽) заморожены гарантом SportPay."
+            );
+
             return $order;
         });
     }
@@ -74,8 +81,6 @@ class EscrowService
             }
 
             $seller = User::where('id', $order->seller_id)->lockForUpdate()->firstOrFail();
-
-            // Выплата продавцу за вычетом 5% комиссии платформы
             $sellerPayout = round((float) $order->total_price * (1 - self::PLATFORM_FEE_RATE), 2);
 
             $order->update(['status' => OrderStatus::Completed]);
@@ -91,13 +96,19 @@ class EscrowService
                 $this->recordReview($order, $buyerId, $seller, $rating, $comment);
             }
 
+            $this->logSystemMessage(
+                $order,
+                $buyerId,
+                "Покупатель подтвердил выполнение заказа. Продавцу выплачено {$sellerPayout} ₽."
+            );
+
             return $order;
         });
     }
 
-    public function cancelAndRefundOrder(int $orderId): Order
+    public function cancelAndRefundOrder(int $orderId, int $actorId): Order
     {
-        return DB::transaction(function () use ($orderId): Order {
+        return DB::transaction(function () use ($orderId, $actorId): Order {
             $order = Order::where('id', $orderId)->lockForUpdate()->firstOrFail();
 
             if (!$order->status->isConfirmable()) {
@@ -114,6 +125,12 @@ class EscrowService
                 (float) $order->total_price,
                 TransactionType::Deposit,
                 $order->id
+            );
+
+            $this->logSystemMessage(
+                $order,
+                $actorId,
+                "Заказ отменен. Средства ({$order->total_price} ₽) полностью возвращены покупателю."
             );
 
             return $order;
@@ -133,5 +150,15 @@ class EscrowService
 
         $avgRating = Review::where('seller_id', $seller->id)->avg('rating') ?? 5.00;
         $seller->update(['rating' => round((float) $avgRating, 2)]);
+    }
+
+    private function logSystemMessage(Order $order, int $userId, string $text): void
+    {
+        Message::create([
+            'order_id' => $order->id,
+            'user_id' => $userId,
+            'body' => $text,
+            'is_system' => true,
+        ]);
     }
 }

@@ -17,12 +17,14 @@ class Message extends Model
         'user_id',
         'body',
         'is_system',
+        'read_at',
     ];
 
     protected function casts(): array
     {
         return [
             'is_system' => 'boolean',
+            'read_at' => 'datetime',
         ];
     }
 
