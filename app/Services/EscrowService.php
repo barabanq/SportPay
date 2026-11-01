@@ -99,7 +99,33 @@ class EscrowService
             $this->logSystemMessage(
                 $order,
                 $buyerId,
-                "Покупатель подтвердил выполнение заказа. Продавцу выплачено {$sellerPayout} ₽."
+                "Покупатель подтвердил выполнение заказа. Продавцу выплачено {$sellerPayout} ₽ (комиссия биржи 5%)."
+            );
+
+            return $order;
+        });
+    }
+
+    public function openDispute(int $orderId, int $actorId, string $reason): Order
+    {
+        return DB::transaction(function () use ($orderId, $actorId, $reason): Order {
+            $order = Order::where('id', $orderId)->lockForUpdate()->firstOrFail();
+            $actor = User::findOrFail($actorId);
+
+            if (!$order->isParticipant($actor)) {
+                throw new DomainException('Только участник сделки может открыть спор.');
+            }
+
+            if (!$order->status->isDisputable()) {
+                throw new DomainException('По данному заказу спор уже открыт или сделка завершена.');
+            }
+
+            $order->update(['status' => OrderStatus::Disputed]);
+
+            $this->logSystemMessage(
+                $order,
+                $actor->id,
+                "⚠️ {$actor->username} открыл арбитражный спор! Причина: «{$reason}». Выплата заморожена, к сделке подключен арбитр SportPay."
             );
 
             return $order;
@@ -110,6 +136,10 @@ class EscrowService
     {
         return DB::transaction(function () use ($orderId, $actorId): Order {
             $order = Order::where('id', $orderId)->lockForUpdate()->firstOrFail();
+
+            if ($order->buyer_id === $actorId && $order->status !== OrderStatus::Disputed) {
+                throw new DomainException('Покупатель не может отменить оплаченный заказ напрямую. Откройте спор или попросите продавца сделать возврат.');
+            }
 
             if (!$order->status->isConfirmable()) {
                 throw new DomainException('Невозможно вернуть средства по завершенному заказу.');
@@ -130,7 +160,7 @@ class EscrowService
             $this->logSystemMessage(
                 $order,
                 $actorId,
-                "Заказ отменен. Средства ({$order->total_price} ₽) полностью возвращены покупателю."
+                "Заказ отменен продавцом. Средства ({$order->total_price} ₽) полностью возвращены покупателю."
             );
 
             return $order;

@@ -29,7 +29,7 @@
             </a>
 
             @if(isset($user))
-                <a href="{{ route('users.show', $user) }}" class="text-xs px-3 py-2 rounded-lg {{ request()->fullUrlIs(route('users.show', $user)) ? 'bg-slate-800 text-emerald-400 font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
+                <a href="{{ route('users.show', $user) }}" class="text-xs px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800/60 transition">
                     Мой профиль
                 </a>
             @endif
@@ -54,13 +54,13 @@
                 </div>
             </a>
 
-            @if(isset($allUsers))
+            @if(isset($allUsers) &&$allUsers->isNotEmpty())
             <form action="{{ route('user.switch') }}" method="POST">
                 @csrf
                 <select name="user_id" onchange="this.form.submit()" class="bg-slate-800 border border-slate-700 text-xs rounded-lg px-3 py-2 text-slate-200">
                     @foreach($allUsers as $account)
-                        <option value="{{ $account->id }}" @selected($account->id === $user->id)>
-                            Юзер: {{ $account->username }} ({{ number_format((float) $account->wallet_balance, 0, '.', ' ') }} ₽)
+                        <option value="{{ $account->id }}" @selected($account->id ===$user->id)>
+                            Юзер: {{ $account->username }} ({{ number_format((float)$account->wallet_balance, 0, '.', ' ') }} ₽)
                         </option>
                     @endforeach
                 </select>

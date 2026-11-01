@@ -16,7 +16,7 @@ class AppServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
-        View::composer('layouts.app', function ($view): void {
+        View::composer('*', function ($view): void {
             if (!Auth::check()) {
                 $defaultUser = User::where('email', 'buyer@sportpay.local')->first() ?? User::first();
                 if ($defaultUser) {

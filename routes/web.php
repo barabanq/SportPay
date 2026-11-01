@@ -27,6 +27,7 @@ Route::get('/orders/{order}', [OrderController::class, 'show'])->name('orders.sh
 Route::post('/orders/{order}/confirm', [OrderController::class, 'confirm'])->name('orders.confirm');
 Route::post('/orders/{order}/cancel', [OrderController::class, 'cancel'])->name('orders.cancel');
 Route::post('/orders/{order}/messages', [ChatController::class, 'store'])->name('orders.messages.store');
+Route::post('/orders/{order}/dispute', [OrderController::class, 'dispute'])->name('orders.dispute');
 
 Route::post('/wallet/deposit', [WalletController::class, 'deposit'])->name('wallet.deposit');
 Route::post('/wallet/withdraw', [WalletController::class, 'withdraw'])->name('wallet.withdraw');

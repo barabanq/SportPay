@@ -13,6 +13,7 @@ use App\Services\EscrowService;
 use DomainException;
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\RedirectResponse;
+use App\Http\Requests\OpenDisputeRequest;
 
 class OrderController extends Controller
 {
@@ -77,6 +78,22 @@ class OrderController extends Controller
             return redirect()
                 ->route('orders.show', $order)
                 ->with('success', "Заказ #{$order->id} отменен. Средства возвращены покупателю.");
+        } catch (DomainException $e) {
+            return back()->with('error', $e->getMessage());
+        }
+    }
+    public function dispute(OpenDisputeRequest $request, Order $order): RedirectResponse
+    {
+        try {
+            $this->escrowService->openDispute(
+                $order->id,
+                $this->currentUser()->id,
+                (string) $request->validated('reason')
+            );
+
+            return redirect()
+                ->route('orders.show', $order)
+                ->with('error', "По заказу #{$order->id} открыт спор! Арбитр SportPay уведомлен.");
         } catch (DomainException $e) {
             return back()->with('error', $e->getMessage());
         }
