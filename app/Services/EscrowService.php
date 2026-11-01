@@ -132,6 +132,71 @@ class EscrowService
         });
     }
 
+    public function resolveDispute(int $orderId, int $arbiterId, string $decision, ?string $comment = null): Order
+    {
+        return DB::transaction(function () use ($orderId, $arbiterId, $decision, $comment): Order {
+            $arbiter = User::findOrFail($arbiterId);
+
+            if (!$arbiter->isArbiter()) {
+                throw new DomainException('Только официальный арбитр SportPay может выносить решение по спору.');
+            }
+
+            $order = Order::where('id', $orderId)->lockForUpdate()->firstOrFail();
+
+            if ($order->status !== OrderStatus::Disputed) {
+                throw new DomainException('Решение можно вынести только по заказу в статусе спора.');
+            }
+
+            $verdictNote = $comment ? " Комментарий арбитра: «{$comment}»." : '';
+
+            if ($decision === 'refund_buyer') {
+                $buyer = User::where('id', $order->buyer_id)->lockForUpdate()->firstOrFail();
+
+                Lot::where('id', $order->lot_id)->increment('stock_quantity', $order->quantity);
+                $order->update(['status' => OrderStatus::Cancelled]);
+
+                $this->walletService->applyBalanceChange(
+                    $buyer,
+                    (float) $order->total_price,
+                    TransactionType::Deposit,
+                    $order->id
+                );
+
+                $this->logSystemMessage(
+                    $order,
+                    $arbiter->id,
+                    "⚖️ Арбитр {$arbiter->username} решил спор в пользу покупателя. Средства ({$order->total_price} ₽) возвращены покупателю.{$verdictNote}"
+                );
+
+                return $order;
+            }
+
+            if ($decision === 'release_seller') {
+                $seller = User::where('id', $order->seller_id)->lockForUpdate()->firstOrFail();
+                $sellerPayout = round((float) $order->total_price * (1 - self::PLATFORM_FEE_RATE), 2);
+
+                $order->update(['status' => OrderStatus::Completed]);
+
+                $this->walletService->applyBalanceChange(
+                    $seller,
+                    $sellerPayout,
+                    TransactionType::Payout,
+                    $order->id
+                );
+
+                $this->logSystemMessage(
+                    $order,
+                    $arbiter->id,
+                    "⚖️ Арбитр {$arbiter->username} решил спор в пользу продавца. Выплата ({$sellerPayout} ₽) переведена продавцу.{$verdictNote}"
+                );
+
+                return $order;
+            }
+
+            throw new DomainException('Неизвестный тип решения арбитража.');
+        });
+    }
+
     public function cancelAndRefundOrder(int $orderId, int $actorId): Order
     {
         return DB::transaction(function () use ($orderId, $actorId): Order {

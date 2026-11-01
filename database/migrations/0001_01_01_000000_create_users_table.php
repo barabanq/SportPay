@@ -20,7 +20,7 @@ return new class extends Migration
             $table->string('phone', 20)->nullable();
             $table->decimal('wallet_balance', 12, 2)->default(0.00);
             $table->decimal('rating', 3, 2)->default(0.00);
-            $table->string('status', 30)->default(UserStatus::ACTIVE->value)->index();
+            $table->string('status', 30)->default(UserStatus::Active->value)->index();
             $table->rememberToken();
             $table->timestamps();
         });

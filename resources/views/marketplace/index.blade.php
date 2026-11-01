@@ -2,17 +2,40 @@
 
 @section('content')
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-    <div class="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-5">
-        <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
-            <h2 class="text-lg font-bold text-white">Витрина спортивных лотов</h2>
+    <div class="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+            <h2 class="text-lg font-bold text-white">Витрина спортивных лотов ({{ $lots->count() }})</h2>
             <div class="flex flex-wrap gap-1.5 text-xs">
-                <a href="{{ route('home') }}" class="px-3 py-1.5 rounded-lg {{ !request('type') ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300' }}">Все</a>
-                <a href="{{ route('home', ['type' => 'training_plan']) }}" class="px-3 py-1.5 rounded-lg {{ request('type') === 'training_plan' ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300' }}">Программы</a>
-                <a href="{{ route('home', ['type' => 'coaching']) }}" class="px-3 py-1.5 rounded-lg {{ request('type') === 'coaching' ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300' }}">Тренерство</a>
-                <a href="{{ route('home', ['type' => 'race_slot']) }}" class="px-3 py-1.5 rounded-lg {{ request('type') === 'race_slot' ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300' }}">Слоты</a>
-                <a href="{{ route('home', ['type' => 'equipment']) }}" class="px-3 py-1.5 rounded-lg {{ request('type') === 'equipment' ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300' }}">Экипировка</a>
+                <a href="{{ route('home', array_filter(['search' => request('search'), 'sort' => request('sort')])) }}" class="px-3 py-1.5 rounded-lg {{ !request('type') ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300' }}">Все</a>
+                <a href="{{ route('home', array_filter(['type' => 'training_plan', 'search' => request('search'), 'sort' => request('sort')])) }}" class="px-3 py-1.5 rounded-lg {{ request('type') === 'training_plan' ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300' }}">Программы</a>
+                <a href="{{ route('home', array_filter(['type' => 'coaching', 'search' => request('search'), 'sort' => request('sort')])) }}" class="px-3 py-1.5 rounded-lg {{ request('type') === 'coaching' ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300' }}">Тренерство</a>
+                <a href="{{ route('home', array_filter(['type' => 'race_slot', 'search' => request('search'), 'sort' => request('sort')])) }}" class="px-3 py-1.5 rounded-lg {{ request('type') === 'race_slot' ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300' }}">Слоты</a>
+                <a href="{{ route('home', array_filter(['type' => 'equipment', 'search' => request('search'), 'sort' => request('sort')])) }}" class="px-3 py-1.5 rounded-lg {{ request('type') === 'equipment' ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300' }}">Экипировка</a>
             </div>
         </div>
+
+        <form action="{{ route('home') }}" method="GET" class="grid grid-cols-1 sm:grid-cols-12 gap-2 pt-1">
+            @if(request('type'))
+                <input type="hidden" name="type" value="{{ request('type') }}">
+            @endif
+            <div class="sm:col-span-6 relative">
+                <input type="text" id="lot-search-input" name="search" value="{{ request('search') }}" placeholder="Поиск по названию или описанию..." class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-emerald-500">
+            </div>
+            <div class="sm:col-span-4">
+                <select name="sort" onchange="this.form.submit()" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200">
+                    <option value="latest" @selected(request('sort', 'latest') === 'latest')>Сначала новые</option>
+                    <option value="price_asc" @selected(request('sort') === 'price_asc')>Дешевле (Цена ↑)</option>
+                    <option value="price_desc" @selected(request('sort') === 'price_desc')>Дороже (Цена ↓)</option>
+                    <option value="rating_desc" @selected(request('sort') === 'rating_desc')>По рейтингу тренера ★</option>
+                </select>
+            </div>
+            <div class="sm:col-span-2 flex gap-1">
+                <button type="submit" class="flex-1 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-emerald-400">Найти</button>
+                @if(request()->anyFilled(['search', 'type', 'sort']))
+                    <a href="{{ route('home') }}" title="Сбросить фильтры" class="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-rose-500/20 text-xs text-slate-400 hover:text-rose-300">✕</a>
+                @endif
+            </div>
+        </form>
 
         <div class="overflow-x-auto">
             <table class="w-full text-left border-collapse text-sm">
@@ -25,38 +48,44 @@
                         <th class="py-3 px-2 text-right">Действие</th>
                     </tr>
                 </thead>
-                <tbody class="divide-y divide-slate-800/70">
-                    @foreach($lots as $lot)
-                    <tr class="hover:bg-slate-800/40">
-                        <td class="py-3 px-2"><span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-300">{{ $lot->product_type }}</span></td>
-                        <td class="py-3 px-2">
-                            <div class="font-semibold text-white">{{ $lot->title }}</div>
-                            <div class="text-xs text-slate-400">{{ $lot->description }} ({{ $lot->stock_quantity }} шт.)</div>
-                        </td>
-                        <td class="py-3 px-2">
-                            <a href="{{ route('users.show', $lot->seller_id) }}" class="font-medium text-emerald-400 hover:underline">{{ $lot->seller->username ?? '-' }}</a>
-                            <div class="text-xs text-amber-400">★ {{ number_format((float) ($lot->seller->rating ?? 5), 2) }}</div>
-                        </td>
-                        <td class="py-3 px-2 text-right font-bold text-emerald-400">{{ number_format((float) $lot->price, 0, '.', ' ') }} ₽</td>
-                        <td class="py-3 px-2 text-right">
-                            @if($user && $lot->seller_id !== $user->id)
-                                <form action="{{ route('lots.purchase', $lot) }}" method="POST">
-                                    @csrf
-                                    <button type="submit" class="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs">Купить</button>
-                                </form>
-                            @else
-                                <div class="flex items-center justify-end gap-1.5">
-                                    <a href="{{ route('lots.edit', $lot) }}" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-200">✎ Изм.</a>
-                                    <form action="{{ route('lots.destroy', $lot) }}" method="POST">
+                <tbody id="lots-table-body" class="divide-y divide-slate-800/70">
+                    @if($lots->isEmpty())
+                        <tr>
+                            <td colspan="5" class="py-8 text-center text-slate-500 text-xs">По вашему запросу лотов не найдено.</td>
+                        </tr>
+                    @else
+                        @foreach($lots as $lot)
+                        <tr class="lot-row hover:bg-slate-800/40">
+                            <td class="py-3 px-2"><span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-300">{{ $lot->product_type }}</span></td>
+                            <td class="py-3 px-2">
+                                <div class="font-semibold text-white">{{ $lot->title }}</div>
+                                <div class="text-xs text-slate-400">{{ $lot->description }} ({{ $lot->stock_quantity }} шт.)</div>
+                            </td>
+                            <td class="py-3 px-2">
+                                <a href="{{ route('users.show', $lot->seller_id) }}" class="font-medium text-emerald-400 hover:underline">{{ $lot->seller->username ?? '-' }}</a>
+                                <div class="text-xs text-amber-400">★ {{ number_format((float) ($lot->seller->rating ?? 5), 2) }}</div>
+                            </td>
+                            <td class="py-3 px-2 text-right font-bold text-emerald-400">{{ number_format((float) $lot->price, 0, '.', ' ') }} ₽</td>
+                            <td class="py-3 px-2 text-right">
+                                @if($user && $lot->seller_id !== $user->id)
+                                    <form action="{{ route('lots.purchase', $lot) }}" method="POST">
                                         @csrf
-                                        @method('DELETE')
-                                        <button type="submit" class="px-2.5 py-1 rounded-lg bg-rose-500/10 text-rose-300 text-xs">✕</button>
+                                        <button type="submit" class="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs">Купить</button>
                                     </form>
-                                </div>
-                            @endif
-                        </td>
-                    </tr>
-                    @endforeach
+                                @else
+                                    <div class="flex items-center justify-end gap-1.5">
+                                        <a href="{{ route('lots.edit', $lot) }}" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-200">✎ Изм.</a>
+                                        <form action="{{ route('lots.destroy', $lot) }}" method="POST">
+                                            @csrf
+                                            @method('DELETE')
+                                            <button type="submit" class="px-2.5 py-1 rounded-lg bg-rose-500/10 text-rose-300 text-xs">✕</button>
+                                        </form>
+                                    </div>
+                                @endif
+                            </td>
+                        </tr>
+                        @endforeach
+                    @endif
                 </tbody>
             </table>
         </div>
@@ -146,4 +175,13 @@
         </div>
     </div>
 </div>
+
+<script>
+document.getElementById('lot-search-input')?.addEventListener('input', function (e) {
+    const term = e.target.value.toLowerCase();
+    document.querySelectorAll('#lots-table-body .lot-row').forEach(row => {
+        row.style.display = row.textContent.toLowerCase().includes(term) ? '' : 'none';
+    });
+});
+</script>
 @endsection

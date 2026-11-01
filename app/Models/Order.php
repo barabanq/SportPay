@@ -67,7 +67,9 @@ class Order extends Model
 
     public function isParticipant(User $user): bool
     {
-        return $this->buyer_id === $user->id || $this->seller_id === $user->id;
+        return $this->buyer_id === $user->id
+            || $this->seller_id === $user->id
+            || $user->isArbiter();
     }
 
     public function counterpartyFor(User $user): User

@@ -4,9 +4,13 @@ declare(strict_types=1);
 
 namespace App\Providers;
 
+use App\Enums\OrderStatus;
+use App\Enums\UserStatus;
 use App\Models\Message;
+use App\Models\Order;
 use App\Models\User;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\View;
 use Illuminate\Support\ServiceProvider;
 
@@ -17,6 +21,21 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         View::composer('*', function ($view): void {
+            if (!Schema::hasTable('users')) {
+                return;
+            }
+
+            User::firstOrCreate(
+                ['email' => 'arbiter@sportpay.local'],
+                [
+                    'username' => 'Arbiter_Judge',
+                    'password' => 'secret123',
+                    'wallet_balance' => 0.00,
+                    'rating' => 5.00,
+                    'status' => UserStatus::Active,
+                ]
+            );
+
             if (!Auth::check()) {
                 $defaultUser = User::where('email', 'buyer@sportpay.local')->first() ?? User::first();
                 if ($defaultUser) {
@@ -39,10 +58,15 @@ class AppServiceProvider extends ServiceProvider
                     ->count();
             }
 
+            $disputedOrdersCount = Schema::hasTable('orders')
+                ? Order::where('status', OrderStatus::Disputed)->count()
+                : 0;
+
             $view->with([
                 'user' => $user,
                 'allUsers' => User::orderBy('id')->get(),
                 'unreadMessagesCount' => $unreadMessagesCount,
+                'disputedOrdersCount' => $disputedOrdersCount,
             ]);
         });
     }

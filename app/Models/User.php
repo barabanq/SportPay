@@ -48,4 +48,14 @@ class User extends Authenticatable
     {
         return $this->hasMany(Review::class, 'seller_id');
     }
+
+    public function globalMessages(): HasMany
+    {
+        return $this->hasMany(GlobalMessage::class, 'user_id');
+    }
+
+    public function isArbiter(): bool
+    {
+        return $this->email === 'arbiter@sportpay.local' || str_starts_with($this->username, 'Arbiter');
+    }
 }

@@ -2,13 +2,15 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\ChatController;
 use App\Http\Controllers\LotController;
 use App\Http\Controllers\MarketplaceController;
 use App\Http\Controllers\OrderController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\WalletController;
-use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\ArbitrationController;
+use App\Http\Controllers\GlobalChatController;
 
 Route::get('/', [MarketplaceController::class, 'index'])->name('home');
 Route::post('/switch-user', [MarketplaceController::class, 'switchUser'])->name('user.switch');
@@ -31,3 +33,9 @@ Route::post('/orders/{order}/dispute', [OrderController::class, 'dispute'])->nam
 
 Route::post('/wallet/deposit', [WalletController::class, 'deposit'])->name('wallet.deposit');
 Route::post('/wallet/withdraw', [WalletController::class, 'withdraw'])->name('wallet.withdraw');
+
+Route::get('/arbitration', [ArbitrationController::class, 'index'])->name('arbitration.index');
+Route::post('/orders/{order}/resolve', [ArbitrationController::class, 'resolve'])->name('orders.resolve');
+
+Route::get('/global-chat', [GlobalChatController::class, 'index'])->name('chat.global');
+Route::post('/global-chat/messages', [GlobalChatController::class, 'store'])->name('chat.global.store');

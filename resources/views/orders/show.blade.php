@@ -42,6 +42,8 @@
                             <option value="5">★★★★★ Отлично (5)</option>
                             <option value="4">★★★★☆ Хорошо (4)</option>
                             <option value="3">★★★☆☆ Нормально (3)</option>
+                            <option value="2">★★☆☆☆ Плохо (2)</option>
+                            <option value="1">★☆☆☆☆ Ужасно (1)</option>
                         </select>
                         <textarea name="comment" rows="2" placeholder="Отзыв продавцу..." class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white"></textarea>
                         <button type="submit" class="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs">

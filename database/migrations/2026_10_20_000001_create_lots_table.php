@@ -20,7 +20,7 @@ return new class extends Migration
             $table->text('description')->nullable();
             $table->decimal('price', 12, 2);
             $table->integer('stock_quantity')->default(1);
-            $table->string('status', 30)->default(LotStatus::ACTIVE->value)->index();
+            $table->string('status', 30)->default(LotStatus::Active->value)->index();
             $table->timestamps();
         });
     }
