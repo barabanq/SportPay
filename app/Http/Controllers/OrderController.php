@@ -77,6 +77,27 @@ class OrderController extends Controller
             return back()->with('error', $e->getMessage());
         }
     }
+
+    public function store(\App\Http\Requests\PurchaseLotRequest $request, Lot $lot): RedirectResponse
+    {
+        $buyer = $this->currentUser();
+        $this->authorizeAction('purchase', $lot);
+
+        try {
+            $order = $this->escrowService->purchaseLot(
+                buyerId: $buyer->id,
+                lotId: $lot->id,
+                quantity: $request->quantity()
+            );
+
+            return redirect()
+                ->route('orders.show', $order)
+                ->with('success', "Заказ #{$order->id} успешно оплачен! Средства заморожены в гаранте SportPay.");
+        } catch (DomainException $e) {
+            return back()->with('error', $e->getMessage());
+        }
+    }
+    
     public function dispute(OpenDisputeRequest $request, Order $order): RedirectResponse
     {
         try {

@@ -3,19 +3,19 @@
 @section('title', 'Общий чат — SportPay')
 
 @section('content')
-<div class="max-w-4xl mx-auto bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden flex flex-col h-[70vh]">
+<div class="max-w-4xl mx-auto bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden flex flex-col h-[74vh]">
     <div class="p-4 border-b border-slate-800 bg-slate-900/80 flex items-center justify-between">
         <h1 class="text-base font-extrabold text-white flex items-center gap-2">
             🌍 Общий спортивный чат SportPay
         </h1>
         <div class="flex items-center gap-2">
-            <span id="ws-indicator" class="w-2.5 h-2.5 rounded-full bg-rose-500" title="WebSocket отключен"></span>
-            <span id="ws-text" class="text-xs text-slate-400">Подключение к сокету...</span>
+            <span class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+            <span class="text-xs text-slate-400">Живой эфир</span>
         </div>
     </div>
 
     <!-- Лента сообщений -->
-    <div id="chat-messages" class="flex-1 p-4 space-y-3 overflow-y-auto">
+    <div id="chat-messages" style="overflow-y: auto; scroll-behavior: auto;" class="flex-1 p-4 space-y-3 overflow-y-auto">
         @if($messages->isEmpty())
             <div id="no-messages" class="text-center text-sm text-slate-500 py-12">
                 Сообщений пока нет. Напишите первым!
@@ -23,10 +23,10 @@
         @else
             @foreach($messages as $msg)
                 @php $isMe = $msg->user_id === $user->id; @endphp
-                <div class="flex flex-col {{ $isMe ? 'items-end' : 'items-start' }}">
+                <div class="flex flex-col {{ $isMe ? 'items-end' : 'items-start' }}" data-msg-id="{{ $msg->id }}">
                     <div class="text-[11px] text-slate-400 mb-1">
                         <span class="font-bold text-slate-300">{{ $msg->user->username ?? 'Юзер' }}</span>
-                        • {{ $msg->created_at->format('H:i') }}
+                        • {{ $msg->created_at?->format('H:i') }}
                     </div>
                     <div class="max-w-lg px-4 py-2.5 rounded-2xl text-sm {{ $isMe ? 'bg-emerald-500 text-slate-950 font-medium' : 'bg-slate-800 text-slate-100 border border-slate-700' }}">
                         {{ $msg->body }}
@@ -47,63 +47,66 @@
 </div>
 
 <script>
-document.addEventListener('DOMContentLoaded', function () {
+(function () {
     const chatMessages = document.getElementById('chat-messages');
     const chatForm = document.getElementById('chat-form');
     const chatInput = document.getElementById('chat-input');
-    const wsIndicator = document.getElementById('ws-indicator');
-    const wsText = document.getElementById('ws-text');
     const currentUserId = {{ (int) $user->id }};
+    const pollUrl = "{{ route('chat.global.messages') }}";
 
-    // Жесткая прокрутка вниз через анимационный фрейм браузера
-    function scrollToBottom() {
-        requestAnimationFrame(() => {
-            chatMessages.scrollTop = chatMessages.scrollHeight;
-        });
+    let lastMessageId = {{ (int) ($messages->last()?->id ?? 0) }};
+
+    function forceScrollBottom() {
+        if (!chatMessages) return;
+        chatMessages.scrollTop = chatMessages.scrollHeight + 9999;
     }
 
-    // Скроллим при старте
-    scrollToBottom();
+    forceScrollBottom();
+    window.addEventListener('load', () => {
+        forceScrollBottom();
+        setTimeout(forceScrollBottom, 120);
+    });
 
-    // Индикатор статуса WebSocket
-    if (window.Echo) {
-        window.Echo.connector.pusher.connection.bind('connected', () => {
-            wsIndicator.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse';
-            wsText.textContent = 'Reverb активен';
-        });
-        window.Echo.connector.pusher.connection.bind('disconnected', () => {
-            wsIndicator.className = 'w-2.5 h-2.5 rounded-full bg-amber-500';
-            wsText.textContent = 'Соединение потеряно';
-        });
-    }
+    function appendGlobalMessage(msg) {
+        const msgId = Number(msg.id || 0);
+        if (msgId > 0 && chatMessages.querySelector(`[data-msg-id="${msgId}"]`)) {
+            return;
+        }
+        if (msgId > lastMessageId) {
+            lastMessageId = msgId;
+        }
 
-    function appendMessage(username, body, time, isMe) {
         const noMsg = document.getElementById('no-messages');
         if (noMsg) noMsg.remove();
 
+        const isMe = Number(msg.user_id) === currentUserId;
         const wrapper = document.createElement('div');
         wrapper.className = `flex flex-col ${isMe ? 'items-end' : 'items-start'}`;
+        if (msgId > 0) wrapper.setAttribute('data-msg-id', String(msgId));
 
-        wrapper.innerHTML = `
-            <div class="text-[11px] text-slate-400 mb-1">
-                <span class="font-bold text-slate-300">${username}</span> • ${time}
-            </div>
-            <div class="max-w-lg px-4 py-2.5 rounded-2xl text-sm ${isMe ? 'bg-emerald-500 text-slate-950 font-medium' : 'bg-slate-800 text-slate-100 border border-slate-700'}`}>
-                ${body}
-            </div>
-        `;
+        const meta = document.createElement('div');
+        meta.className = 'text-[11px] text-slate-400 mb-1';
+        meta.innerHTML = `<span class="font-bold text-slate-300"></span> • ${msg.time}`;
+        meta.querySelector('span').textContent = msg.username;
+
+        const bubble = document.createElement('div');
+        bubble.className = `max-w-lg px-4 py-2.5 rounded-2xl text-sm ${isMe ? 'bg-emerald-500 text-slate-950 font-medium' : 'bg-slate-800 text-slate-100 border border-slate-700'}`;
+        bubble.textContent = msg.body;
+
+        wrapper.appendChild(meta);
+        wrapper.appendChild(bubble);
 
         chatMessages.appendChild(wrapper);
-        scrollToBottom(); // Всегда вниз при новом сообщении
+        forceScrollBottom();
     }
 
-    // Отправка через AJAX
     chatForm.addEventListener('submit', async function (e) {
         e.preventDefault();
         const body = chatInput.value.trim();
         if (!body) return;
 
         chatInput.value = '';
+        chatInput.focus();
 
         try {
             const response = await fetch("{{ route('chat.global.store') }}", {
@@ -116,24 +119,33 @@ document.addEventListener('DOMContentLoaded', function () {
                 body: JSON.stringify({ body })
             });
 
-            const data = await response.json();
-            if (data.status === 'success') {
-                appendMessage(data.message.user.username, data.message.body, data.message.time, true);
+            if (response.ok) {
+                const data = await response.json();
+                if (data.message) appendGlobalMessage(data.message);
             }
         } catch (err) {
             console.error('Ошибка отправки:', err);
         }
     });
 
-    // Получение сокетов
     if (window.Echo) {
         window.Echo.channel('public-chat')
-            .listen('.message.sent', (data) => {
-                if (Number(data.user_id) !== currentUserId) {
-                    appendMessage(data.username, data.body, data.time, false);
-                }
-            });
+            .listen('.message.sent', (data) => appendGlobalMessage(data));
     }
-});
+
+    setInterval(async () => {
+        try {
+            const res = await fetch(`${pollUrl}?after_id=${lastMessageId}`, {
+                headers: { 'Accept': 'application/json' }
+            });
+            if (res.ok) {
+                const data = await res.json();
+                if (Array.isArray(data.messages)) {
+                    data.messages.forEach(appendGlobalMessage);
+                }
+            }
+        } catch (e) {}
+    }, 2000);
+})();
 </script>
 @endsection

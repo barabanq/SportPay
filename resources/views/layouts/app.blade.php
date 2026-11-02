@@ -40,67 +40,29 @@
                 Каталог лотов
             </a>
 
-            <!-- Ссылка на личные сообщения (сделки) -->
-            <a href="{{ route('chat.index') }}" class="relative flex items-center gap-2 text-xs px-3.5 py-2 rounded-lg {{ request()->routeIs('chat.index') || request()->routeIs('orders.show') ? 'bg-slate-800 text-white font-bold border border-slate-700' : 'bg-slate-800/60 hover:bg-slate-800 text-slate-200' }} transition">
-                <span>💬 Сообщения</span>
-                @if(($unreadMessagesCount ?? 0) > 0)
-                    <span class="px-1.5 py-0.5 text-[11px] font-extrabold rounded-full bg-rose-500 text-white leading-none">
-                        {{ $unreadMessagesCount }}
-                    </span>
-                @endif
+            <a href="{{ route('chat.index') }}" class="text-xs px-3.5 py-2 rounded-lg {{ request()->routeIs('chat.*') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
+                💬 Сообщения
             </a>
 
-            <!-- Ссылка на глобальный общий чат -->
             <a href="{{ route('chat.global') }}" class="text-xs px-3.5 py-2 rounded-lg {{ request()->routeIs('chat.global') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
                 🌍 Общий чат
             </a>
 
-            <!-- Ссылка на панель арбитража (если есть) -->
-            @if(isset($user) && $user->isArbiter())
-                <a href="{{ route('arbitration.index') }}" class="text-xs px-3.5 py-2 rounded-lg {{ request()->routeIs('arbitration.*') ? 'bg-rose-500/20 text-rose-300 font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
-                    ⚖️ Арбитраж
-                </a>
-            @endif
-
-            @if(isset($user))
-                <a href="{{ route('users.show', $user) }}" class="text-xs px-3 py-2 rounded-lg text-slate-300 hover:bg-slate-800/60 transition">
-                    Мой профиль
-                </a>
-            @endif
+            <!-- Ссылка на Финансы и Кошелек -->
+            <a href="{{ route('wallet.index') }}" class="text-xs px-3.5 py-2 rounded-lg {{ request()->routeIs('wallet.*') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
+                💳 Финансы
+            </a>
         </div>
 
-        <!-- Блок профиля и переключения юзеров в правой части шапки -->
+        <!-- Правый блок с балансом и профилем (если авторизован) -->
         @if(isset($user))
-        <div class="flex flex-wrap items-center gap-4">
-            <a href="{{ route('users.show', $user) }}" class="flex items-center gap-4 bg-slate-800/90 hover:bg-slate-800 px-4 py-2 rounded-xl border border-slate-700 transition">
-                <div>
-                    <div class="text-xs text-slate-400">Аккаунт</div>
-                    <div class="font-bold text-sm text-white flex items-center gap-1.5">
-                        {{ $user->username }}
-                        <span class="text-amber-400 text-xs">★ {{ number_format((float) $user->rating, 2) }}</span>
-                    </div>
-                </div>
-                <div class="h-7 w-px bg-slate-700"></div>
-                <div>
-                    <div class="text-xs text-slate-400">Баланс</div>
-                    <div class="font-extrabold text-emerald-400 text-sm">
-                        {{ number_format((float) $user->wallet_balance, 2, '.', ' ') }} ₽
-                    </div>
+        <div class="flex items-center gap-4">
+            <a href="{{ route('wallet.index') }}" class="bg-slate-800/90 hover:bg-slate-800 px-4 py-2 rounded-xl border border-slate-700 transition">
+                <div class="text-[10px] text-slate-400">Баланс кошелька</div>
+                <div class="font-extrabold text-emerald-400 text-xs">
+                    {{ number_format((float) $user->wallet_balance, 2, '.', ' ') }} ₽
                 </div>
             </a>
-
-            @if(isset($allUsers) && $allUsers->isNotEmpty())
-            <form action="{{ route('user.switch') }}" method="POST">
-                @csrf
-                <select name="user_id" onchange="this.form.submit()" class="bg-slate-800 border border-slate-700 text-xs rounded-lg px-3 py-2 text-slate-200">
-                    @foreach($allUsers as $account)
-                        <option value="{{ $account->id }}" @selected($account->id === $user->id)>
-                            Юзер: {{ $account->username }} ({{ number_format((float) $account->wallet_balance, 0, '.', ' ') }} ₽)
-                        </option>
-                    @endforeach
-                </select>
-            </form>
-            @endif
         </div>
         @endif
     </div>

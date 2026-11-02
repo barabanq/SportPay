@@ -68,4 +68,13 @@ class LotController extends Controller
 
         return redirect()->route('home')->with('success', 'Лот удален.');
     }
+    public function show(Lot $lot): View
+    {
+        $lot->load(['seller', 'reviews.author']);
+
+        return view('lots.show', [
+            'user' => $this->currentUser(),
+            'lot' => $lot,
+        ]);
+    }
 }
