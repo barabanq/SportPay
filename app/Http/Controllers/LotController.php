@@ -17,7 +17,7 @@ class LotController extends Controller
         $data = $request->validate([
             'title' => ['required', 'string', 'max:255'],
             'product_type' => ['required', 'string', 'in:training_plan,coaching,race_slot,equipment'],
-            'description' => ['required', 'string', 'max:2000'],
+            'description' => ['nullable', 'string', 'max:2000'],
             'auto_delivery_text' => ['nullable', 'string', 'max:2000'],
             'price' => ['required', 'numeric', 'min:50', 'max:1000000'],
             'stock_quantity' => ['required', 'integer', 'min:1', 'max:1000'],
@@ -49,7 +49,7 @@ class LotController extends Controller
         $data = $request->validate([
             'title' => ['required', 'string', 'max:255'],
             'product_type' => ['required', 'string', 'in:training_plan,coaching,race_slot,equipment'],
-            'description' => ['required', 'string', 'max:2000'],
+            'description' => ['nullable', 'string', 'max:2000'],
             'auto_delivery_text' => ['nullable', 'string', 'max:2000'],
             'price' => ['required', 'numeric', 'min:50', 'max:1000000'],
             'stock_quantity' => ['required', 'integer', 'min:0', 'max:1000'],
@@ -68,6 +68,7 @@ class LotController extends Controller
 
         return redirect()->route('home')->with('success', 'Лот удален.');
     }
+
     public function show(Lot $lot): View
     {
         $lot->load(['seller', 'reviews.author']);

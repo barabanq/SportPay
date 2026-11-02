@@ -18,7 +18,7 @@ class StoreLotRequest extends FormRequest
         return [
             'title' => ['required', 'string', 'max:255'],
             'product_type' => ['required', 'string', 'in:training_plan,coaching,race_slot,equipment,nutrition'],
-            'description' => ['required', 'string', 'max:5000'],
+            'description' => ['nullable', 'string', 'max:5000'],
             'price' => ['required', 'numeric', 'min:50', 'max:1000000'],
             'stock_quantity' => ['required', 'integer', 'min:1', 'max:1000'],
         ];

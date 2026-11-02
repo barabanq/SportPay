@@ -54,19 +54,25 @@
                             <td colspan="5" class="py-8 text-center text-slate-500 text-xs">По вашему запросу лотов не найдено.</td>
                         </tr>
                     @else
-                        @foreach($lots as $lot)
-                        <tr class="lot-row hover:bg-slate-800/40">
-                            <td class="py-3 px-2"><span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-300">{{ $lot->product_type }}</span></td>
+                        @foreach ($lots as $lot)
+                        <tr class="lot-row hover:bg-slate-800/40 transition">
                             <td class="py-3 px-2">
-                            <div class="font-semibold text-white flex items-center gap-1.5">
-                            <span>{{ $lot->title }}</span>
-                            @if($lot->hasAutoDelivery())
-                                <span title="Мгновенная автовыдача после оплаты" class="px-1.5 py-0.5 text-[10px] font-extrabold rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                                    ⚡ Автовыдача
-                                </span>
-                            @endif
-                        </div>
-                                <div class="text-xs text-slate-400">{{ $lot->description }} ({{ $lot->stock_quantity }} шт.)</div>
+                                <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-300">{{ $lot->product_type }}</span>
+                            </td>
+                            <td class="py-3 px-2">
+                                <div class="font-semibold text-white flex items-center gap-1.5">
+                                    <a href="{{ route('lots.show', $lot) }}" class="hover:text-emerald-400 hover:underline transition">
+                                        {{ $lot->title }}
+                                    </a>
+                                    @if($lot->hasAutoDelivery())
+                                        <span title="Мгновенная автовыдача после оплаты" class="px-1.5 py-0.5 text-[10px] font-extrabold rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                            ⚡ Автовыдача
+                                        </span>
+                                    @endif
+                                </div>
+                                <a href="{{ route('lots.show', $lot) }}" class="block text-xs text-slate-400 hover:text-slate-300">
+                                    {{ $lot->description ? $lot->description . ' • ' : '' }}В наличии: {{ $lot->stock_quantity }} шт.
+                                </a>
                             </td>
                             <td class="py-3 px-2">
                                 <a href="{{ route('users.show', $lot->seller_id) }}" class="font-medium text-emerald-400 hover:underline">{{ $lot->seller->username ?? '-' }}</a>
@@ -75,12 +81,17 @@
                             <td class="py-3 px-2 text-right font-bold text-emerald-400">{{ number_format((float) $lot->price, 0, '.', ' ') }} ₽</td>
                             <td class="py-3 px-2 text-right">
                                 @if($user && $lot->seller_id !== $user->id)
-                                    <form action="{{ route('lots.purchase', $lot) }}" method="POST">
-                                        @csrf
-                                        <button type="submit" class="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs">Купить</button>
-                                    </form>
+                                    <div class="flex items-center justify-end gap-1.5">
+                                        <a href="{{ route('lots.show', $lot) }}" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium">Открыть</a>
+                                        <form action="{{ route('lots.purchase', $lot) }}" method="POST" class="flex items-center gap-1">
+                                            @csrf
+                                            <input type="number" name="quantity" value="1" min="1" max="{{ $lot->stock_quantity }}" title="Количество" class="w-14 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white text-center">
+                                            <button type="submit" class="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs">Купить</button>
+                                        </form>
+                                    </div>
                                 @else
                                     <div class="flex items-center justify-end gap-1.5">
+                                        <a href="{{ route('lots.show', $lot) }}" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-300">👁</a>
                                         <a href="{{ route('lots.edit', $lot) }}" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-200">✎ Изм.</a>
                                         <form action="{{ route('lots.destroy', $lot) }}" method="POST">
                                             @csrf
@@ -114,7 +125,7 @@
                 </form>
             </div>
             <div class="space-y-1.5 max-h-40 overflow-y-auto">
-                @foreach($myTransactions as $tx)
+                @foreach ($myTransactions as $tx)
                     <div class="flex items-center justify-between text-xs py-1.5 px-2 rounded bg-slate-800/60">
                         <span class="font-semibold text-slate-200">{{ $tx->type->label() }}</span>
                         <span class="font-bold {{ $tx->amount >= 0 ? 'text-emerald-400' : 'text-rose-400' }}">
@@ -130,19 +141,19 @@
             <form action="{{ route('lots.store') }}" method="POST" class="space-y-3 text-sm">
                 @csrf
                 <input type="text" name="title" required placeholder="Название лота..." class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white">
-                <div class="grid grid-cols-2 gap-2">
-                    <select name="product_type" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white">
+                <div class="grid grid-cols-3 gap-2">
+                    <select name="product_type" class="bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-2 text-white text-xs">
                         <option value="training_plan">Программа</option>
                         <option value="coaching">Тренерство</option>
                         <option value="race_slot">Слот на забег</option>
                         <option value="equipment">Экипировка</option>
                     </select>
-                    <input type="number" name="price" value="2000" min="50" required class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white">
+                    <input type="number" name="price" value="2000" min="50" required placeholder="Цена (₽)" title="Цена за 1 шт." class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs">
+                    <input type="number" name="stock_quantity" value="5" min="1" max="1000" required placeholder="Кол-во (шт.)" title="Количество в наличии" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs">
                 </div>
-                <input type="hidden" name="stock_quantity" value="5">
-                <textarea name="description" rows="2" required placeholder="Описание..." class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white"></textarea>
+                <textarea name="description" rows="2" placeholder="Описание (необязательно)..." class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white"></textarea>
                 <textarea name="auto_delivery_text" rows="2" placeholder="⚡ Секретный текст/ссылка для автовыдачи (необязательно)..." class="w-full bg-slate-950 border border-emerald-500/40 rounded-lg px-3 py-2 text-xs text-emerald-300 placeholder-slate-500"></textarea>
-                <button type="submit" class="w-full py-2.5 rounded-xl bg-indigo-500 text-white font-bold text-xs">Опубликовать</button>
+                <button type="submit" class="w-full py-2.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white font-bold text-xs transition">Опубликовать</button>
             </form>
         </div>
     </div>
@@ -152,11 +163,11 @@
     <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5">
         <h3 class="text-base font-bold text-white mb-3">Мои покупки</h3>
         <div class="space-y-3">
-            @foreach($myPurchases as $order)
+            @foreach ($myPurchases as $order)
                 <div class="p-3.5 rounded-xl bg-slate-800/60 border border-slate-700/70 flex items-center justify-between">
                     <div>
                         <a href="{{ route('orders.show', $order) }}" class="font-bold text-emerald-400 hover:underline text-sm">
-                            Заказ #{{ $order->id }}: {{ $order->lot->title ?? 'Лот' }}
+                            Заказ #{{ $order->id }}: {{ $order->lot->title ?? 'Лот' }} ({{ $order->quantity }} шт.)
                         </a>
                         <div class="text-xs text-slate-400">Продавец: {{ $order->seller->username ?? '-' }} • {{ number_format((float) $order->total_price, 0, '.', ' ') }} ₽</div>
                     </div>
@@ -169,11 +180,11 @@
     <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5">
         <h3 class="text-base font-bold text-white mb-3">Мои продажи</h3>
         <div class="space-y-3">
-            @foreach($mySales as $order)
+            @foreach ($mySales as $order)
                 <div class="p-3.5 rounded-xl bg-slate-800/60 border border-slate-700/70 flex items-center justify-between">
                     <div>
                         <a href="{{ route('orders.show', $order) }}" class="font-bold text-emerald-400 hover:underline text-sm">
-                            Заказ #{{ $order->id }}: {{ $order->lot->title ?? 'Лот' }}
+                            Заказ #{{ $order->id }}: {{ $order->lot->title ?? 'Лот' }} ({{ $order->quantity }} шт.)
                         </a>
                         <div class="text-xs text-slate-400">Покупатель: {{ $order->buyer->username ?? '-' }} • +{{ number_format((float) $order->total_price, 0, '.', ' ') }} ₽</div>
                     </div>

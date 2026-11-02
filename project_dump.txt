@@ -1,0 +1,4305 @@
+==> app/Services/WalletService.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services;
+
+use App\Enums\TransactionStatus;
+use App\Enums\TransactionType;
+use App\Models\User;
+use App\Models\WalletTransaction;
+use DomainException;
+use Illuminate\Support\Facades\DB;
+
+class WalletService
+{
+    public function deposit(int $userId, float $amount, ?int $orderId = null): WalletTransaction
+    {
+        if ($amount <= 0) {
+            throw new DomainException('Сумма пополнения должна быть больше нуля.');
+        }
+
+        return DB::transaction(function () use ($userId, $amount, $orderId): WalletTransaction {
+            $user = User::where('id', $userId)->lockForUpdate()->firstOrFail();
+
+            return $this->applyBalanceChange($user, $amount, TransactionType::Deposit, $orderId);
+        });
+    }
+
+    public function withdraw(int $userId, float $amount): WalletTransaction
+    {
+        if ($amount <= 0) {
+            throw new DomainException('Сумма вывода должна быть больше нуля.');
+        }
+
+        return DB::transaction(function () use ($userId, $amount): WalletTransaction {
+            $user = User::where('id', $userId)->lockForUpdate()->firstOrFail();
+
+            if ((float) $user->wallet_balance < $amount) {
+                throw new DomainException('Недостаточно средств на балансе для вывода.');
+            }
+
+            return $this->applyBalanceChange($user, -$amount, TransactionType::Withdraw);
+        });
+    }
+
+    /**
+     * Единая точка изменения баланса и записи аудиторского следа (DRY).
+     * Вызывается внутри активной БД-транзакции с заблокированным User.
+     */
+    public function applyBalanceChange(
+        User $lockedUser,
+        float $signedAmount,
+        TransactionType $type,
+        ?int $orderId = null
+    ): WalletTransaction {
+        $newBalance = round((float) $lockedUser->wallet_balance + $signedAmount, 2);
+
+        if ($newBalance < 0) {
+            throw new DomainException('Недостаточно средств на кошельке.');
+        }
+
+        $lockedUser->update(['wallet_balance' => $newBalance]);
+
+        return WalletTransaction::create([
+            'user_id' => $lockedUser->id,
+            'order_id' => $orderId,
+            'amount' => $signedAmount,
+            'type' => $type,
+            'balance_after' => $newBalance,
+            'status' => TransactionStatus::Success,
+        ]);
+    }
+}
+==> app/Services/EscrowService.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services;
+
+use App\Enums\OrderStatus;
+use App\Enums\TransactionType;
+use App\Models\Lot;
+use App\Models\Message;
+use App\Models\Order;
+use App\Models\Review;
+use App\Models\User;
+use DomainException;
+use Illuminate\Support\Facades\DB;
+
+class EscrowService
+{
+    private const PLATFORM_FEE_RATE = 0.05;
+
+    public function __construct(
+        private readonly WalletService $walletService
+    ) {}
+
+    public function purchaseLot(int $buyerId, int $lotId, int $quantity = 1): Order
+    {
+        return DB::transaction(function () use ($buyerId, $lotId, $quantity): Order {
+            $lot = Lot::where('id', $lotId)->lockForUpdate()->firstOrFail();
+            $buyer = User::where('id', $buyerId)->lockForUpdate()->firstOrFail();
+
+            if ($lot->seller_id === $buyer->id) {
+                throw new DomainException('Нельзя купить собственный лот.');
+            }
+
+            if ($lot->stock_quantity < $quantity) {
+                throw new DomainException('Товара нет в нужном количестве.');
+            }
+
+            $totalPrice = round((float) $lot->price * $quantity, 2);
+
+            $lot->decrement('stock_quantity', $quantity);
+
+            $initialStatus = $lot->hasAutoDelivery()
+                ? OrderStatus::Shipped
+                : OrderStatus::Paid;
+
+            $order = Order::create([
+                'lot_id' => $lot->id,
+                'buyer_id' => $buyer->id,
+                'seller_id' => $lot->seller_id,
+                'quantity' => $quantity,
+                'unit_price' => $lot->price,
+                'total_price' => $totalPrice,
+                'status' => $initialStatus,
+            ]);
+
+            $this->walletService->applyBalanceChange(
+                $buyer,
+                -$totalPrice,
+                TransactionType::Purchase,
+                $order->id
+            );
+
+            $this->logSystemMessage(
+                $order,
+                $buyer->id,
+                "Покупатель {$buyer->username} оплатил заказ. Средства ({$totalPrice} ₽) заморожены гарантом SportPay."
+            );
+
+            if ($lot->hasAutoDelivery()) {
+                $this->logSystemMessage(
+                    $order,
+                    $lot->seller_id,
+                    "⚡ АВТОВЫДАЧА ТОВАРА: {$lot->auto_delivery_text}"
+                );
+            }
+
+            return $order;
+        });
+    }
+
+    public function confirmOrder(int $orderId, int $buyerId, ?int $rating = null, ?string $comment = null): Order
+    {
+        return DB::transaction(function () use ($orderId, $buyerId, $rating, $comment): Order {
+            $order = Order::where('id', $orderId)->lockForUpdate()->firstOrFail();
+
+            if ($order->buyer_id !== $buyerId) {
+                throw new DomainException('Только покупатель может подтвердить выполнение заказа.');
+            }
+
+            if (!$order->status->isConfirmable()) {
+                throw new DomainException('Заказ уже закрыт или отменен.');
+            }
+
+            $seller = User::where('id', $order->seller_id)->lockForUpdate()->firstOrFail();
+            $sellerPayout = round((float) $order->total_price * (1 - self::PLATFORM_FEE_RATE), 2);
+
+            $order->update(['status' => OrderStatus::Completed]);
+
+            $this->walletService->applyBalanceChange(
+                $seller,
+                $sellerPayout,
+                TransactionType::Payout,
+                $order->id
+            );
+
+            if ($rating !== null) {
+                $this->recordReview($order, $buyerId, $seller, $rating, $comment);
+            }
+
+            $this->logSystemMessage(
+                $order,
+                $buyerId,
+                "Покупатель подтвердил выполнение заказа. Продавцу выплачено {$sellerPayout} ₽ (комиссия биржи 5%)."
+            );
+
+            return $order;
+        });
+    }
+
+    public function openDispute(int $orderId, int $actorId, string $reason): Order
+    {
+        return DB::transaction(function () use ($orderId, $actorId, $reason): Order {
+            $order = Order::where('id', $orderId)->lockForUpdate()->firstOrFail();
+            $actor = User::findOrFail($actorId);
+
+            if (!$order->isParticipant($actor)) {
+                throw new DomainException('Только участник сделки может открыть спор.');
+            }
+
+            if (!$order->status->isDisputable()) {
+                throw new DomainException('По данному заказу спор уже открыт или сделка завершена.');
+            }
+
+            $order->update(['status' => OrderStatus::Disputed]);
+
+            $this->logSystemMessage(
+                $order,
+                $actor->id,
+                "⚠️ {$actor->username} открыл арбитражный спор! Причина: «{$reason}». Выплата заморожена, к сделке подключен арбитр SportPay."
+            );
+
+            return $order;
+        });
+    }
+
+    public function resolveDispute(int $orderId, int $arbiterId, string $decision, ?string $comment = null): Order
+    {
+        return DB::transaction(function () use ($orderId, $arbiterId, $decision, $comment): Order {
+            $arbiter = User::findOrFail($arbiterId);
+
+            if (!$arbiter->isArbiter()) {
+                throw new DomainException('Только официальный арбитр SportPay может выносить решение по спору.');
+            }
+
+            $order = Order::where('id', $orderId)->lockForUpdate()->firstOrFail();
+
+            if ($order->status !== OrderStatus::Disputed) {
+                throw new DomainException('Решение можно вынести только по заказу в статусе спора.');
+            }
+
+            $verdictNote = $comment ? " Комментарий арбитра: «{$comment}»." : '';
+
+            if ($decision === 'refund_buyer') {
+                $buyer = User::where('id', $order->buyer_id)->lockForUpdate()->firstOrFail();
+
+                Lot::where('id', $order->lot_id)->increment('stock_quantity', $order->quantity);
+                $order->update(['status' => OrderStatus::Cancelled]);
+
+                $this->walletService->applyBalanceChange(
+                    $buyer,
+                    (float) $order->total_price,
+                    TransactionType::Deposit,
+                    $order->id
+                );
+
+                $this->logSystemMessage(
+                    $order,
+                    $arbiter->id,
+                    "⚖️ Арбитр {$arbiter->username} решил спор в пользу покупателя. Средства ({$order->total_price} ₽) возвращены покупателю.{$verdictNote}"
+                );
+
+                return $order;
+            }
+
+            if ($decision === 'release_seller') {
+                $seller = User::where('id', $order->seller_id)->lockForUpdate()->firstOrFail();
+                $sellerPayout = round((float) $order->total_price * (1 - self::PLATFORM_FEE_RATE), 2);
+
+                $order->update(['status' => OrderStatus::Completed]);
+
+                $this->walletService->applyBalanceChange(
+                    $seller,
+                    $sellerPayout,
+                    TransactionType::Payout,
+                    $order->id
+                );
+
+                $this->logSystemMessage(
+                    $order,
+                    $arbiter->id,
+                    "⚖️ Арбитр {$arbiter->username} решил спор в пользу продавца. Выплата ({$sellerPayout} ₽) переведена продавцу.{$verdictNote}"
+                );
+
+                return $order;
+            }
+
+            throw new DomainException('Неизвестный тип решения арбитража.');
+        });
+    }
+
+    public function cancelAndRefundOrder(int $orderId, int $actorId): Order
+    {
+        return DB::transaction(function () use ($orderId, $actorId): Order {
+            $order = Order::where('id', $orderId)->lockForUpdate()->firstOrFail();
+
+            if ($order->buyer_id === $actorId && $order->status !== OrderStatus::Disputed) {
+                throw new DomainException('Покупатель не может отменить оплаченный заказ напрямую. Откройте спор или попросите продавца сделать возврат.');
+            }
+
+            if (!$order->status->isConfirmable()) {
+                throw new DomainException('Невозможно вернуть средства по завершенному заказу.');
+            }
+
+            $buyer = User::where('id', $order->buyer_id)->lockForUpdate()->firstOrFail();
+
+            Lot::where('id', $order->lot_id)->increment('stock_quantity', $order->quantity);
+            $order->update(['status' => OrderStatus::Cancelled]);
+
+            $this->walletService->applyBalanceChange(
+                $buyer,
+                (float) $order->total_price,
+                TransactionType::Deposit,
+                $order->id
+            );
+
+            $this->logSystemMessage(
+                $order,
+                $actorId,
+                "Заказ отменен продавцом. Средства ({$order->total_price} ₽) полностью возвращены покупателю."
+            );
+
+            return $order;
+        });
+    }
+
+    private function recordReview(Order $order, int $buyerId, User $seller, int $rating, ?string $comment): void
+    {
+        Review::create([
+            'order_id' => $order->id,
+            'author_id' => $buyerId,
+            'seller_id' => $seller->id,
+            'lot_id' => $order->lot_id,
+            'rating' => $rating,
+            'comment' => $comment ?: 'Сделка прошла отлично!',
+        ]);
+
+        $avgRating = Review::where('seller_id', $seller->id)->avg('rating') ?? 5.00;
+        $seller->update(['rating' => round((float) $avgRating, 2)]);
+    }
+
+    private function logSystemMessage(Order $order, int $userId, string $text): void
+    {
+        Message::create([
+            'order_id' => $order->id,
+            'user_id' => $userId,
+            'body' => $text,
+            'is_system' => true,
+        ]);
+    }
+}
+==> app/Http/Controllers/ChatController.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Controllers;
+
+use App\Events\OrderMessageSent;
+use App\Models\Message;
+use App\Models\Order;
+use App\Models\User;
+use Illuminate\Contracts\View\View;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+
+class ChatController extends Controller
+{
+    public function index(Request $request): View
+    {
+        $user =$this->currentUser();
+
+        $orders = Order::with(['lot', 'buyer', 'seller', 'latestMessage'])
+            ->where(function ($query) use ($user): void {
+                $query->where('buyer_id',$user->id)
+                    ->orWhere('seller_id', $user->id);
+            })
+            ->withCount([
+                'messages as unread_count' => function ($query) use ($user): void {
+                    $query->where('user_id', '!=',$user->id)->whereNull('read_at');
+                },
+            ])
+            ->latest('updated_at')
+            ->get();
+
+        $activeOrder = null;
+
+        if ($request->filled('order_id')) {$activeOrder = Order::with(['lot', 'buyer', 'seller', 'messages.user'])
+                ->findOrFail((int) $request->integer('order_id'));
+
+            $this->authorizeAction('view',$activeOrder);
+        } elseif ($orders->isNotEmpty()) {$activeOrder = Order::with(['lot', 'buyer', 'seller', 'messages.user'])
+                ->find($orders->first()->id);
+        }
+
+        if ($activeOrder !== null) {
+            Message::where('order_id', $activeOrder->id)
+                ->where('user_id', '!=', $user->id)
+                ->whereNull('read_at')
+                ->update(['read_at' => now()]);
+        }
+
+        return view('chat.index', [
+            'user' => $user,
+            'allUsers' => User::orderBy('id')->get(),
+            'orders' => $orders,
+            'activeOrder' => $activeOrder,
+        ]);
+    }
+
+    public function messages(Request $request, Order$order): JsonResponse
+    {
+        $user =$this->currentUser();
+        $this->authorizeAction('view',$order);
+
+        $afterId = (int)$request->query('after_id', 0);
+
+        $messages = Message::with('user')
+            ->where('order_id', $order->id)
+            ->where('id', '>', $afterId)
+            ->oldest('id')
+            ->get();
+
+        if ($messages->isNotEmpty()) {
+            Message::where('order_id', $order->id)
+                ->where('user_id', '!=', $user->id)
+                ->whereNull('read_at')
+                ->update(['read_at' => now()]);
+        }
+
+        return response()->json([
+            'messages' => $messages->map(fn (Message$msg): array => [
+                'id' => $msg->id,
+                'order_id' => $msg->order_id,
+                'user_id' => $msg->user_id,
+                'username' => $msg->user->username ?? 'Система',
+                'body' => $msg->body,
+                'is_system' => (bool) $msg->is_system,
+                'time' => $msg->created_at?->format('H:i') ?? now()->format('H:i'),
+            ]),
+        ]);
+    }
+
+    public function store(Request $request, Order$order): JsonResponse|RedirectResponse
+    {
+        $user =$this->currentUser();
+        $this->authorizeAction('sendMessage',$order);
+
+        $data =$request->validate([
+            'body' => ['required', 'string', 'max:2000'],
+        ]);
+
+        $message = Message::create([
+            'order_id' => $order->id,
+            'user_id' => $user->id,
+            'body' => $data['body'],
+            'is_system' => false,
+        ]);
+
+        $message->load('user');$order->touch();
+
+        try {
+            broadcast(new OrderMessageSent($message))->toOthers();
+        } catch (\Throwable) {
+            // Игнорируем ошибку сокета, если Reverb не запущен — отработает фоновый пуллинг
+        }
+
+        $payload = [
+            'id' => $message->id,
+            'order_id' => $order->id,
+            'user_id' => $user->id,
+            'username' => $user->username,
+            'body' => $message->body,
+            'is_system' => false,
+            'time' => $message->created_at?->format('H:i') ?? now()->format('H:i'),
+        ];
+
+        if ($request->wantsJson()) {
+            return response()->json([
+                'status' => 'success',
+                'message' => $payload,
+            ]);
+        }
+
+        return back();
+    }
+}
+==> app/Http/Controllers/MarketplaceController.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Controllers;
+
+use App\Models\Lot;
+use App\Models\Order;
+use App\Models\User;
+use App\Models\WalletTransaction;
+use Illuminate\Contracts\View\View;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+
+class MarketplaceController extends Controller
+{
+    public function index(Request $request): View
+    {
+        $user =$this->currentUser();
+
+        $lots = Lot::with('seller')
+            ->filter(
+                type: $request->query('type'),
+                search: $request->query('search')
+            )
+            ->sortBy($request->query('sort'))
+            ->get();
+
+        return view('marketplace.index', [
+            'user' => $user,
+            'lots' => $lots,
+            'myPurchases' => Order::with(['lot', 'seller'])
+                ->where('buyer_id', $user->id)
+                ->latest()
+                ->get(),
+            'mySales' => Order::with(['lot', 'buyer'])
+                ->where('seller_id', $user->id)
+                ->latest()
+                ->get(),
+            'myTransactions' => WalletTransaction::where('user_id', $user->id)
+                ->latest()
+                ->limit(15)
+                ->get(),
+        ]);
+    }
+
+    public function switchUser(Request $request): RedirectResponse
+    {
+        $user = User::findOrFail($request->integer('user_id'));
+        Auth::login($user);
+
+        return redirect()->route('home')->with('success', "Вы переключились на аккаунт {$user->username}");
+    }
+}
+==> app/Http/Controllers/LotController.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Controllers;
+
+use App\Enums\LotStatus;
+use App\Models\Lot;
+use Illuminate\Contracts\View\View;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+
+class LotController extends Controller
+{
+    public function store(Request $request): RedirectResponse
+    {
+        $data = $request->validate([
+            'title' => ['required', 'string', 'max:255'],
+            'product_type' => ['required', 'string', 'in:training_plan,coaching,race_slot,equipment'],
+            'description' => ['required', 'string', 'max:2000'],
+            'auto_delivery_text' => ['nullable', 'string', 'max:2000'],
+            'price' => ['required', 'numeric', 'min:50', 'max:1000000'],
+            'stock_quantity' => ['required', 'integer', 'min:1', 'max:1000'],
+        ]);
+
+        Lot::create([
+            ...$data,
+            'seller_id' => $this->currentUser()->id,
+            'status' => LotStatus::Active,
+        ]);
+
+        return redirect()->route('home')->with('success', 'Лот успешно опубликован на витрине!');
+    }
+
+    public function edit(Lot $lot): View
+    {
+        $this->authorizeAction('update', $lot);
+
+        return view('lots.edit', [
+            'user' => $this->currentUser(),
+            'lot' => $lot,
+        ]);
+    }
+
+    public function update(Request $request, Lot $lot): RedirectResponse
+    {
+        $this->authorizeAction('update', $lot);
+
+        $data = $request->validate([
+            'title' => ['required', 'string', 'max:255'],
+            'product_type' => ['required', 'string', 'in:training_plan,coaching,race_slot,equipment'],
+            'description' => ['required', 'string', 'max:2000'],
+            'auto_delivery_text' => ['nullable', 'string', 'max:2000'],
+            'price' => ['required', 'numeric', 'min:50', 'max:1000000'],
+            'stock_quantity' => ['required', 'integer', 'min:0', 'max:1000'],
+        ]);
+
+        $lot->update($data);
+
+        return redirect()->route('home')->with('success', 'Лот успешно обновлен!');
+    }
+
+    public function destroy(Lot $lot): RedirectResponse
+    {
+        $this->authorizeAction('delete', $lot);
+
+        $lot->delete();
+
+        return redirect()->route('home')->with('success', 'Лот удален.');
+    }
+    public function show(Lot $lot): View
+    {
+        $lot->load(['seller', 'reviews.author']);
+
+        return view('lots.show', [
+            'user' => $this->currentUser(),
+            'lot' => $lot,
+        ]);
+    }
+}
+==> app/Http/Controllers/ProfileController.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Controllers;
+
+use App\Models\User;
+use Illuminate\Contracts\View\View;
+
+class ProfileController extends Controller
+{
+    public function show(User $profileUser): View
+    {
+        $profileUser->load([
+            'lots' => fn ($q) => $q->where('stock_quantity', '>', 0)->latest(),
+            'receivedReviews' => fn ($q) => $q->with(['author', 'lot'])->latest(),
+        ]);
+
+        $completedSalesCount = $profileUser->receivedReviews->count();
+
+        return view('users.show', [
+            'user' => $this->currentUser(),
+            'allUsers' => User::orderBy('id')->get(),
+            'profileUser' => $profileUser,
+            'completedSalesCount' => $completedSalesCount,
+        ]);
+    }
+}
+==> app/Http/Controllers/WalletController.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Controllers;
+
+use App\Enums\OrderStatus;
+use App\Models\Order;
+use App\Models\User;
+use App\Models\WalletTransaction;
+use App\Services\WalletService;
+use DomainException;
+use Illuminate\Contracts\View\View;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+
+class WalletController extends Controller
+{
+    public function __construct(
+        private readonly WalletService $walletService
+    ) {}
+
+    public function index(): View
+    {
+        $user = $this->currentUser();
+
+        $transactions = WalletTransaction::where('user_id', $user->id)
+            ->latest('id')
+            ->limit(50)
+            ->get();
+
+        $activeStatuses = [
+            OrderStatus::Paid,
+            OrderStatus::Shipped,
+            OrderStatus::Disputed,
+        ];
+
+        // Сумма, которую пользователь заморозил как покупатель
+        $frozenAsBuyer = (float) Order::where('buyer_id', $user->id)
+            ->whereIn('status', $activeStatuses)
+            ->sum('total_price');
+
+        // Ожидаемая выплата (минус 5% комиссии) по активным продажам
+        $pendingAsSeller = round((float) Order::where('seller_id', $user->id)
+            ->whereIn('status', $activeStatuses)
+            ->sum('total_price') * 0.95, 2);
+
+        return view('wallet.index', [
+            'user' => $user,
+            'allUsers' => User::orderBy('id')->get(),
+            'transactions' => $transactions,
+            'frozenAsBuyer' => $frozenAsBuyer,
+            'pendingAsSeller' => $pendingAsSeller,
+        ]);
+    }
+
+    public function deposit(Request $request): RedirectResponse
+    {
+        $data = $request->validate([
+            'amount' => ['required', 'numeric', 'min:100', 'max:500000'],
+        ]);
+
+        try {
+            $this->walletService->deposit($this->currentUser()->id, (float) $data['amount']);
+
+            return back()->with('success', 'Баланс успешно пополнен!');
+        } catch (DomainException $e) {
+            return back()->with('error', $e->getMessage());
+        }
+    }
+
+    public function withdraw(Request $request): RedirectResponse
+    {
+        $data = $request->validate([
+            'amount' => ['required', 'numeric', 'min:100', 'max:500000'],
+        ]);
+
+        try {
+            $this->walletService->withdraw($this->currentUser()->id, (float) $data['amount']);
+
+            return back()->with('success', 'Заявка на вывод средств выполнена!');
+        } catch (DomainException $e) {
+            return back()->with('error', $e->getMessage());
+        }
+    }
+}
+==> app/Http/Controllers/Auth/PasswordController.php <==
+<?php
+
+namespace App\Http\Controllers\Auth;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Validation\Rules\Password;
+
+class PasswordController extends Controller
+{
+    /**
+     * Update the user's password.
+     */
+    public function update(Request $request): RedirectResponse
+    {
+        $validated = $request->validate([
+            'current_password' => ['required', 'current_password'],
+            'password' => ['required', Password::defaults(), 'confirmed'],
+        ]);
+
+        $request->user()->update([
+            'password' => Hash::make($validated['password']),
+        ]);
+
+        return back();
+    }
+}
+
+==> app/Http/Controllers/Auth/ConfirmablePasswordController.php <==
+<?php
+
+namespace App\Http\Controllers\Auth;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Validation\ValidationException;
+use Inertia\Inertia;
+use Inertia\Response;
+
+class ConfirmablePasswordController extends Controller
+{
+    /**
+     * Show the confirm password view.
+     */
+    public function show(): Response
+    {
+        return Inertia::render('Auth/ConfirmPassword');
+    }
+
+    /**
+     * Confirm the user's password.
+     */
+    public function store(Request $request): RedirectResponse
+    {
+        if (! Auth::guard('web')->validate([
+            'email' => $request->user()->email,
+            'password' => $request->password,
+        ])) {
+            throw ValidationException::withMessages([
+                'password' => __('auth.password'),
+            ]);
+        }
+
+        $request->session()->put('auth.password_confirmed_at', time());
+
+        return redirect()->intended(route('dashboard', absolute: false));
+    }
+}
+
+==> app/Http/Controllers/Auth/VerifyEmailController.php <==
+<?php
+
+namespace App\Http\Controllers\Auth;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Auth\Events\Verified;
+use Illuminate\Foundation\Auth\EmailVerificationRequest;
+use Illuminate\Http\RedirectResponse;
+
+class VerifyEmailController extends Controller
+{
+    /**
+     * Mark the authenticated user's email address as verified.
+     */
+    public function __invoke(EmailVerificationRequest $request): RedirectResponse
+    {
+        if ($request->user()->hasVerifiedEmail()) {
+            return redirect()->intended(route('dashboard', absolute: false).'?verified=1');
+        }
+
+        if ($request->user()->markEmailAsVerified()) {
+            event(new Verified($request->user()));
+        }
+
+        return redirect()->intended(route('dashboard', absolute: false).'?verified=1');
+    }
+}
+
+==> app/Http/Controllers/Auth/RegisteredUserController.php <==
+<?php
+
+namespace App\Http\Controllers\Auth;
+
+use App\Http\Controllers\Controller;
+use App\Models\User;
+use Illuminate\Auth\Events\Registered;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Validation\Rules;
+use Illuminate\Validation\ValidationException;
+use Inertia\Inertia;
+use Inertia\Response;
+
+class RegisteredUserController extends Controller
+{
+    /**
+     * Display the registration view.
+     */
+    public function create(): Response
+    {
+        return Inertia::render('Auth/Register');
+    }
+
+    /**
+     * Handle an incoming registration request.
+     *
+     * @throws ValidationException
+     */
+    public function store(Request $request): RedirectResponse
+    {
+        $request->validate([
+            'name' => 'required|string|max:255',
+            'email' => 'required|string|lowercase|email|max:255|unique:'.User::class,
+            'password' => ['required', 'confirmed', Rules\Password::defaults()],
+        ]);
+
+        $user = User::create([
+            'name' => $request->name,
+            'email' => $request->email,
+            'password' => Hash::make($request->password),
+        ]);
+
+        event(new Registered($user));
+
+        Auth::login($user);
+
+        return redirect(route('dashboard', absolute: false));
+    }
+}
+
+==> app/Http/Controllers/Auth/EmailVerificationPromptController.php <==
+<?php
+
+namespace App\Http\Controllers\Auth;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Inertia\Inertia;
+use Inertia\Response;
+
+class EmailVerificationPromptController extends Controller
+{
+    /**
+     * Display the email verification prompt.
+     */
+    public function __invoke(Request $request): RedirectResponse|Response
+    {
+        return $request->user()->hasVerifiedEmail()
+                    ? redirect()->intended(route('dashboard', absolute: false))
+                    : Inertia::render('Auth/VerifyEmail', ['status' => session('status')]);
+    }
+}
+
+==> app/Http/Controllers/Auth/EmailVerificationNotificationController.php <==
+<?php
+
+namespace App\Http\Controllers\Auth;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+
+class EmailVerificationNotificationController extends Controller
+{
+    /**
+     * Send a new email verification notification.
+     */
+    public function store(Request $request): RedirectResponse
+    {
+        if ($request->user()->hasVerifiedEmail()) {
+            return redirect()->intended(route('dashboard', absolute: false));
+        }
+
+        $request->user()->sendEmailVerificationNotification();
+
+        return back()->with('status', 'verification-link-sent');
+    }
+}
+
+==> app/Http/Controllers/Auth/PasswordResetLinkController.php <==
+<?php
+
+namespace App\Http\Controllers\Auth;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Password;
+use Illuminate\Validation\ValidationException;
+use Inertia\Inertia;
+use Inertia\Response;
+
+class PasswordResetLinkController extends Controller
+{
+    /**
+     * Display the password reset link request view.
+     */
+    public function create(): Response
+    {
+        return Inertia::render('Auth/ForgotPassword', [
+            'status' => session('status'),
+        ]);
+    }
+
+    /**
+     * Handle an incoming password reset link request.
+     *
+     * @throws ValidationException
+     */
+    public function store(Request $request): RedirectResponse
+    {
+        $request->validate([
+            'email' => 'required|email',
+        ]);
+
+        // We will send the password reset link to this user. Once we have attempted
+        // to send the link, we will examine the response then see the message we
+        // need to show to the user. Finally, we'll send out a proper response.
+        $status = Password::sendResetLink(
+            $request->only('email')
+        );
+
+        if ($status == Password::RESET_LINK_SENT) {
+            return back()->with('status', __($status));
+        }
+
+        throw ValidationException::withMessages([
+            'email' => [trans($status)],
+        ]);
+    }
+}
+
+==> app/Http/Controllers/Auth/AuthenticatedSessionController.php <==
+<?php
+
+namespace App\Http\Controllers\Auth;
+
+use App\Http\Controllers\Controller;
+use App\Http\Requests\Auth\LoginRequest;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Route;
+use Inertia\Inertia;
+use Inertia\Response;
+
+class AuthenticatedSessionController extends Controller
+{
+    /**
+     * Display the login view.
+     */
+    public function create(): Response
+    {
+        return Inertia::render('Auth/Login', [
+            'canResetPassword' => Route::has('password.request'),
+            'status' => session('status'),
+        ]);
+    }
+
+    /**
+     * Handle an incoming authentication request.
+     */
+    public function store(LoginRequest $request): RedirectResponse
+    {
+        $request->authenticate();
+
+        $request->session()->regenerate();
+
+        return redirect()->intended(route('dashboard', absolute: false));
+    }
+
+    /**
+     * Destroy an authenticated session.
+     */
+    public function destroy(Request $request): RedirectResponse
+    {
+        Auth::guard('web')->logout();
+
+        $request->session()->invalidate();
+
+        $request->session()->regenerateToken();
+
+        return redirect('/');
+    }
+}
+
+==> app/Http/Controllers/Auth/NewPasswordController.php <==
+<?php
+
+namespace App\Http\Controllers\Auth;
+
+use App\Http\Controllers\Controller;
+use Illuminate\Auth\Events\PasswordReset;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Password;
+use Illuminate\Support\Str;
+use Illuminate\Validation\Rules;
+use Illuminate\Validation\ValidationException;
+use Inertia\Inertia;
+use Inertia\Response;
+
+class NewPasswordController extends Controller
+{
+    /**
+     * Display the password reset view.
+     */
+    public function create(Request $request): Response
+    {
+        return Inertia::render('Auth/ResetPassword', [
+            'email' => $request->email,
+            'token' => $request->route('token'),
+        ]);
+    }
+
+    /**
+     * Handle an incoming new password request.
+     *
+     * @throws ValidationException
+     */
+    public function store(Request $request): RedirectResponse
+    {
+        $request->validate([
+            'token' => 'required',
+            'email' => 'required|email',
+            'password' => ['required', 'confirmed', Rules\Password::defaults()],
+        ]);
+
+        // Here we will attempt to reset the user's password. If it is successful we
+        // will update the password on an actual user model and persist it to the
+        // database. Otherwise we will parse the error and return the response.
+        $status = Password::reset(
+            $request->only('email', 'password', 'password_confirmation', 'token'),
+            function ($user) use ($request) {
+                $user->forceFill([
+                    'password' => Hash::make($request->password),
+                    'remember_token' => Str::random(60),
+                ])->save();
+
+                event(new PasswordReset($user));
+            }
+        );
+
+        // If the password was successfully reset, we will redirect the user back to
+        // the application's home authenticated view. If there is an error we can
+        // redirect them back to where they came from with their error message.
+        if ($status == Password::PASSWORD_RESET) {
+            return redirect()->route('login')->with('status', __($status));
+        }
+
+        throw ValidationException::withMessages([
+            'email' => [trans($status)],
+        ]);
+    }
+}
+
+==> app/Http/Controllers/ArbitrationController.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Controllers;
+
+use App\Enums\OrderStatus;
+use App\Models\Order;
+use App\Services\EscrowService;
+use DomainException;
+use Illuminate\Contracts\View\View;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+
+class ArbitrationController extends Controller
+{
+    public function __construct(
+        private readonly EscrowService $escrowService
+    ) {}
+
+    public function index(): View
+    {
+        $user = $this->currentUser();
+
+        $disputedOrders = Order::with(['lot', 'buyer', 'seller', 'latestMessage'])
+            ->where('status', OrderStatus::Disputed)
+            ->latest('updated_at')
+            ->get();
+
+        return view('arbitration.index', [
+            'user' => $user,
+            'disputedOrders' => $disputedOrders,
+        ]);
+    }
+
+    public function resolve(Request $request, Order $order): RedirectResponse
+    {
+        $data = $request->validate([
+            'decision' => ['required', 'string', 'in:refund_buyer,release_seller'],
+            'comment' => ['nullable', 'string', 'max:1000'],
+        ]);
+
+        try {
+            $this->escrowService->resolveDispute(
+                orderId: $order->id,
+                arbiterId: $this->currentUser()->id,
+                decision: $data['decision'],
+                comment: $data['comment'] ?? null
+            );
+
+            return redirect()
+                ->route('orders.show', $order)
+                ->with('success', "Спор по заказу #{$order->id} успешно разрешен арбитром!");
+        } catch (DomainException $e) {
+            return back()->with('error', $e->getMessage());
+        }
+    }
+}
+==> app/Http/Controllers/GlobalChatController.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Controllers;
+
+use App\Events\MessageSent;
+use App\Models\GlobalMessage;
+use App\Models\User;
+use Illuminate\Contracts\View\View;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+
+class GlobalChatController extends Controller
+{
+    public function index(): View
+    {
+        $messages = GlobalMessage::with('user')
+            ->latest('id')
+            ->limit(50)
+            ->get()
+            ->reverse()
+            ->values();
+
+        return view('chat.global', [
+            'user' => $this->currentUser(),
+            'allUsers' => User::orderBy('id')->get(),
+            'messages' => $messages,
+        ]);
+    }
+
+    public function messages(Request $request): JsonResponse
+    {
+        $afterId = (int) $request->query('after_id', 0);
+
+        $messages = GlobalMessage::with('user')
+            ->where('id', '>', $afterId)
+            ->oldest('id')
+            ->limit(50)
+            ->get();
+
+        return response()->json([
+            'messages' => $messages->map(fn (GlobalMessage $msg): array => [
+                'id' => $msg->id,
+                'user_id' => $msg->user_id,
+                'username' => $msg->user->username ?? 'Юзер',
+                'body' => $msg->body,
+                'time' => $msg->created_at?->format('H:i') ?? now()->format('H:i'),
+            ]),
+        ]);
+    }
+
+    public function store(Request $request): JsonResponse
+    {
+        $user = $this->currentUser();
+
+        $data = $request->validate([
+            'body' => ['required', 'string', 'max:1000'],
+        ]);
+
+        $message = GlobalMessage::create([
+            'user_id' => $user->id,
+            'body' => $data['body'],
+        ]);
+
+        $message->load('user');
+
+        try {
+            broadcast(new MessageSent($message))->toOthers();
+        } catch (\Throwable) {
+            // Игнорируем ошибку сокета, если Reverb не запущен
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'message' => [
+                'id' => $message->id,
+                'user_id' => $user->id,
+                'username' => $user->username,
+                'body' => $message->body,
+                'time' => $message->created_at?->format('H:i') ?? now()->format('H:i'),
+            ],
+        ]);
+    }
+}
+==> app/Http/Controllers/Controller.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Controllers;
+
+use App\Models\User;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Gate;
+
+abstract class Controller
+{
+    protected function currentUser(): User
+    {
+        /** @var User|null $user */
+        $user = Auth::user();
+
+        if ($user === null) {
+            $user = User::where('email', 'buyer@sportpay.local')->first() ?? User::firstOrFail();
+            Auth::login($user);
+        }
+
+        return $user;
+    }
+
+    protected function authorizeAction(string $ability, mixed $arguments): void
+    {
+        Gate::forUser($this->currentUser())->authorize($ability, $arguments);
+    }
+}
+==> app/Http/Controllers/OrderController.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Controllers;
+
+use App\Http\Requests\ConfirmOrderRequest;
+use App\Models\Lot;
+use App\Models\Message;
+use App\Models\Order;
+use App\Models\User;
+use App\Services\EscrowService;
+use DomainException;
+use Illuminate\Contracts\View\View;
+use Illuminate\Http\RedirectResponse;
+use App\Http\Requests\OpenDisputeRequest;
+
+class OrderController extends Controller
+{
+    public function __construct(
+        private readonly EscrowService $escrowService
+    ) {}
+
+    public function show(Order $order): View
+    {
+        $user = $this->currentUser();
+        $this->authorizeAction('view', $order);
+
+        $order->load(['lot', 'buyer', 'seller', 'review', 'messages.user']);
+
+        Message::where('order_id', $order->id)
+            ->where('user_id', '!=', $user->id)
+            ->whereNull('read_at')
+            ->update(['read_at' => now()]);
+
+        return view('orders.show', [
+            'user' => $user,
+            'order' => $order,
+        ]);
+    }
+
+    public function purchase(Lot $lot): RedirectResponse
+    {
+        try {
+            $order =$this->escrowService->purchaseLot($this->currentUser()->id,$lot->id);
+            return redirect()
+                ->route('orders.show', $order)
+                ->with('success', "Заказ #{$order->id} оплачен! Обсудите детали передачи с продавцом в чате.");
+        } catch (DomainException $e) {
+            return redirect()->route('home')->with('error', $e->getMessage());
+        }
+    }
+
+    public function confirm(ConfirmOrderRequest $request, Order$order): RedirectResponse
+    {
+        try {
+            $this->escrowService->confirmOrder(
+                $order->id,$this->currentUser()->id,
+                $request->integer('rating', 5),$request->input('comment')
+            );
+            return redirect()
+                ->route('orders.show', $order)
+                ->with('success', "Заказ #{$order->id} подтвержден! Деньги переведены продавцу.");
+        } catch (DomainException $e) {
+            return back()->with('error', $e->getMessage());
+        }
+    }
+
+    public function cancel(Order $order): RedirectResponse
+    {
+        try {
+            $this->escrowService->cancelAndRefundOrder($order->id,$this->currentUser()->id);
+            return redirect()
+                ->route('orders.show', $order)
+                ->with('success', "Заказ #{$order->id} отменен. Средства возвращены покупателю.");
+        } catch (DomainException $e) {
+            return back()->with('error', $e->getMessage());
+        }
+    }
+
+    public function store(\App\Http\Requests\PurchaseLotRequest $request, Lot $lot): RedirectResponse
+    {
+        $buyer = $this->currentUser();
+        $this->authorizeAction('purchase', $lot);
+
+        try {
+            $order = $this->escrowService->purchaseLot(
+                buyerId: $buyer->id,
+                lotId: $lot->id,
+                quantity: $request->quantity()
+            );
+
+            return redirect()
+                ->route('orders.show', $order)
+                ->with('success', "Заказ #{$order->id} успешно оплачен! Средства заморожены в гаранте SportPay.");
+        } catch (DomainException $e) {
+            return back()->with('error', $e->getMessage());
+        }
+    }
+    
+    public function dispute(OpenDisputeRequest $request, Order $order): RedirectResponse
+    {
+        try {
+            $this->escrowService->openDispute(
+                $order->id,
+                $this->currentUser()->id,
+                (string) $request->validated('reason')
+            );
+
+            return redirect()
+                ->route('orders.show', $order)
+                ->with('error', "По заказу #{$order->id} открыт спор! Арбитр SportPay уведомлен.");
+        } catch (DomainException $e) {
+            return back()->with('error', $e->getMessage());
+        }
+    }
+}
+==> app/Http/Requests/OpenDisputeRequest.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Requests;
+
+use Illuminate\Foundation\Http\FormRequest;
+
+class OpenDisputeRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'reason' => ['required', 'string', 'min:5', 'max:1000'],
+        ];
+    }
+}
+==> app/Http/Requests/PurchaseLotRequest.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Requests;
+
+use Illuminate\Foundation\Http\FormRequest;
+
+class PurchaseLotRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'quantity' => ['nullable', 'integer', 'min:1', 'max:1000'],
+        ];
+    }
+
+    public function quantity(): int
+    {
+        return max(1, (int) $this->input('quantity', 1));
+    }
+}
+==> app/Http/Requests/StoreLotRequest.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Requests;
+
+use Illuminate\Foundation\Http\FormRequest;
+
+class StoreLotRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'title' => ['required', 'string', 'max:255'],
+            'product_type' => ['required', 'string', 'in:training_plan,coaching,race_slot,equipment,nutrition'],
+            'description' => ['required', 'string', 'max:5000'],
+            'price' => ['required', 'numeric', 'min:50', 'max:1000000'],
+            'stock_quantity' => ['required', 'integer', 'min:1', 'max:1000'],
+        ];
+    }
+}
+==> app/Http/Requests/UpdateLotRequest.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Requests;
+
+use Illuminate\Foundation\Http\FormRequest;
+
+class UpdateLotRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'title' => ['required', 'string', 'max:255'],
+            'product_type' => ['required', 'string', 'in:training_plan,coaching,race_slot,equipment,nutrition'],
+            'description' => ['required', 'string', 'max:5000'],
+            'price' => ['required', 'numeric', 'min:50', 'max:1000000'],
+            'stock_quantity' => ['required', 'integer', 'min:0', 'max:1000'],
+        ];
+    }
+}
+==> app/Http/Requests/ProfileUpdateRequest.php <==
+<?php
+
+namespace App\Http\Requests;
+
+use App\Models\User;
+use Illuminate\Contracts\Validation\ValidationRule;
+use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
+
+class ProfileUpdateRequest extends FormRequest
+{
+    /**
+     * Get the validation rules that apply to the request.
+     *
+     * @return array<string, ValidationRule|array<mixed>|string>
+     */
+    public function rules(): array
+    {
+        return [
+            'name' => ['required', 'string', 'max:255'],
+            'email' => [
+                'required',
+                'string',
+                'lowercase',
+                'email',
+                'max:255',
+                Rule::unique(User::class)->ignore($this->user()->id),
+            ],
+        ];
+    }
+}
+
+==> app/Http/Requests/Auth/LoginRequest.php <==
+<?php
+
+namespace App\Http\Requests\Auth;
+
+use Illuminate\Auth\Events\Lockout;
+use Illuminate\Contracts\Validation\ValidationRule;
+use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
+
+class LoginRequest extends FormRequest
+{
+    /**
+     * Determine if the user is authorized to make this request.
+     */
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    /**
+     * Get the validation rules that apply to the request.
+     *
+     * @return array<string, ValidationRule|array<mixed>|string>
+     */
+    public function rules(): array
+    {
+        return [
+            'email' => ['required', 'string', 'email'],
+            'password' => ['required', 'string'],
+        ];
+    }
+
+    /**
+     * Attempt to authenticate the request's credentials.
+     *
+     * @throws ValidationException
+     */
+    public function authenticate(): void
+    {
+        $this->ensureIsNotRateLimited();
+
+        if (! Auth::attempt($this->only('email', 'password'), $this->boolean('remember'))) {
+            RateLimiter::hit($this->throttleKey());
+
+            throw ValidationException::withMessages([
+                'email' => trans('auth.failed'),
+            ]);
+        }
+
+        RateLimiter::clear($this->throttleKey());
+    }
+
+    /**
+     * Ensure the login request is not rate limited.
+     *
+     * @throws ValidationException
+     */
+    public function ensureIsNotRateLimited(): void
+    {
+        if (! RateLimiter::tooManyAttempts($this->throttleKey(), 5)) {
+            return;
+        }
+
+        event(new Lockout($this));
+
+        $seconds = RateLimiter::availableIn($this->throttleKey());
+
+        throw ValidationException::withMessages([
+            'email' => trans('auth.throttle', [
+                'seconds' => $seconds,
+                'minutes' => ceil($seconds / 60),
+            ]),
+        ]);
+    }
+
+    /**
+     * Get the rate limiting throttle key for the request.
+     */
+    public function throttleKey(): string
+    {
+        return Str::transliterate(Str::lower($this->string('email')).'|'.$this->ip());
+    }
+}
+
+==> app/Http/Requests/WalletAmountRequest.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Requests;
+
+use Illuminate\Foundation\Http\FormRequest;
+
+class WalletAmountRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'amount' => ['required', 'numeric', 'min:100', 'max:500000'],
+        ];
+    }
+
+    public function amount(): float
+    {
+        return round((float) $this->validated('amount'), 2);
+    }
+}
+==> app/Http/Requests/ConfirmOrderRequest.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Requests;
+
+use Illuminate\Foundation\Http\FormRequest;
+
+class ConfirmOrderRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'rating' => ['required', 'integer', 'min:1', 'max:5'],
+            'comment' => ['nullable', 'string', 'max:1000'],
+        ];
+    }
+}
+==> app/Http/Middleware/HandleInertiaRequests.php <==
+<?php
+
+namespace App\Http\Middleware;
+
+use Illuminate\Http\Request;
+use Inertia\Middleware;
+
+class HandleInertiaRequests extends Middleware
+{
+    /**
+     * The root template that is loaded on the first page visit.
+     *
+     * @var string
+     */
+    protected $rootView = 'app';
+
+    /**
+     * Determine the current asset version.
+     */
+    public function version(Request $request): ?string
+    {
+        return parent::version($request);
+    }
+
+    /**
+     * Define the props that are shared by default.
+     *
+     * @return array<string, mixed>
+     */
+    public function share(Request $request): array
+    {
+        return [
+            ...parent::share($request),
+            'auth' => [
+                'user' => $request->user(),
+            ],
+        ];
+    }
+}
+
+==> app/Events/MessageSent.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Events;
+
+use App\Models\GlobalMessage;
+use Illuminate\Broadcasting\Channel;
+use Illuminate\Broadcasting\InteractsWithSockets;
+use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
+use Illuminate\Foundation\Events\Dispatchable;
+use Illuminate\Queue\SerializesModels;
+
+class MessageSent implements ShouldBroadcastNow
+{
+    use Dispatchable, InteractsWithSockets, SerializesModels;
+
+    public function __construct(
+        public readonly GlobalMessage $globalMessage
+    ) {}
+
+    public function broadcastOn(): array
+    {
+        return [
+            new Channel('public-chat'),
+        ];
+    }
+
+    public function broadcastAs(): string
+    {
+        return 'message.sent';
+    }
+
+    public function broadcastWith(): array
+    {
+        return [
+            'id' => $this->globalMessage->id,
+            'user_id' => $this->globalMessage->user_id,
+            'username' => $this->globalMessage->user->username ?? 'Юзер',
+            'body' => $this->globalMessage->body,
+            'time' => $this->globalMessage->created_at?->format('H:i') ?? now()->format('H:i'),
+        ];
+    }
+}
+==> app/Events/OrderMessageSent.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Events;
+
+use App\Models\Message;
+use Illuminate\Broadcasting\Channel;
+use Illuminate\Broadcasting\InteractsWithSockets;
+use Illuminate\Contracts\Broadcasting\ShouldBroadcastNow;
+use Illuminate\Foundation\Events\Dispatchable;
+use Illuminate\Queue\SerializesModels;
+
+class OrderMessageSent implements ShouldBroadcastNow
+{
+    use Dispatchable, InteractsWithSockets, SerializesModels;
+
+    public function __construct(
+        public readonly Message $message
+    ) {}
+
+    public function broadcastOn(): array
+    {
+        return [
+            new Channel("orders.{$this->message->order_id}"),
+        ];
+    }
+
+    public function broadcastAs(): string
+    {
+        return 'order.message.sent';
+    }
+
+    public function broadcastWith(): array
+    {
+        return [
+            'id' => $this->message->id,
+            'order_id' => $this->message->order_id,
+            'user_id' => $this->message->user_id,
+            'username' => $this->message->user->username ?? 'Система',
+            'body' => $this->message->body,
+            'is_system' => (bool) $this->message->is_system,
+            'time' => $this->message->created_at?->format('H:i') ?? now()->format('H:i'),
+        ];
+    }
+}
+==> app/Enums/UserStatus.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Enums;
+
+enum UserStatus: string
+{
+    case Active = 'active';
+    case Frozen = 'frozen';
+    case Banned = 'banned';
+    case Unverified = 'unverified';
+
+    public function label(): string
+    {
+        return match ($this) {
+            self::Active => 'Активен',
+            self::Frozen => 'Заморожен',
+            self::Banned => 'Заблокирован',
+            self::Unverified => 'Не верифицирован',
+        };
+    }
+
+    public function canTrade(): bool
+    {
+        return $this === self::Active;
+    }
+}
+==> app/Enums/OrderStatus.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Enums;
+
+enum OrderStatus: string
+{
+    case Created = 'created';
+    case Paid = 'paid';
+    case Shipped = 'shipped';
+    case Disputed = 'disputed';
+    case Completed = 'completed';
+    case Cancelled = 'cancelled';
+
+    public function label(): string
+    {
+        return match ($this) {
+            self::Created => 'СОЗДАН',
+            self::Paid => 'В ХОЛДЕ (ОПЛАЧЕН)',
+            self::Shipped => 'ПЕРЕДАН',
+            self::Disputed => 'АРБИТРАЖ (СПОР)',
+            self::Completed => 'ЗАВЕРШЕН',
+            self::Cancelled => 'ОТМЕНЕН (ВОЗВРАТ)',
+        };
+    }
+
+    public function badgeClasses(): string
+    {
+        return match ($this) {
+            self::Completed => 'bg-emerald-500/20 text-emerald-300',
+            self::Cancelled => 'bg-slate-700 text-slate-300',
+            self::Disputed => 'bg-rose-500/20 text-rose-300 border border-rose-500/40',
+            default => 'bg-amber-500/20 text-amber-300',
+        };
+    }
+
+    public function isConfirmable(): bool
+    {
+        return in_array($this, [self::Paid, self::Shipped, self::Disputed], true);
+    }
+
+    public function isDisputable(): bool
+    {
+        return in_array($this, [self::Paid, self::Shipped], true);
+    }
+}
+==> app/Enums/TransactionStatus.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Enums;
+
+enum TransactionStatus: string
+{
+    case Pending = 'pending';
+    case Success = 'success';
+    case Rejected = 'rejected';
+
+    public function label(): string
+    {
+        return match ($this) {
+            self::Pending => 'В обработке',
+            self::Success => 'Успешно',
+            self::Rejected => 'Отклонено',
+        };
+    }
+}
+==> app/Enums/LotStatus.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Enums;
+
+enum LotStatus: string
+{
+    case Draft = 'draft';
+    case Active = 'active';
+    case Reserved = 'reserved';
+    case Sold = 'sold';
+    case Archived = 'archived';
+
+    public function label(): string
+    {
+        return match ($this) {
+            self::Draft => 'Черновик',
+            self::Active => 'Активен',
+            self::Reserved => 'Забронирован',
+            self::Sold => 'Продан',
+            self::Archived => 'В архиве',
+        };
+    }
+}
+==> app/Enums/TransactionType.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Enums;
+
+enum TransactionType: string
+{
+    case Deposit = 'deposit';
+    case Withdraw = 'withdraw';
+    case Purchase = 'purchase';
+    case Payout = 'payout';
+
+    public function label(): string
+    {
+        return match ($this) {
+            self::Deposit => 'ПОПОЛНЕНИЕ',
+            self::Withdraw => 'ВЫВОД',
+            self::Purchase => 'ПОКУПКА (ХОЛД)',
+            self::Payout => 'ВЫПЛАТА С ПРОДАЖИ',
+        };
+    }
+}
+==> app/Providers/AppServiceProvider.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Providers;
+
+use App\Enums\OrderStatus;
+use App\Enums\UserStatus;
+use App\Models\Message;
+use App\Models\Order;
+use App\Models\User;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\View;
+use Illuminate\Support\ServiceProvider;
+
+class AppServiceProvider extends ServiceProvider
+{
+    public function register(): void {}
+
+    public function boot(): void
+    {
+        View::composer('*', function ($view): void {
+            if (!Schema::hasTable('users')) {
+                return;
+            }
+
+            User::firstOrCreate(
+                ['email' => 'arbiter@sportpay.local'],
+                [
+                    'username' => 'Arbiter_Judge',
+                    'password' => 'secret123',
+                    'wallet_balance' => 0.00,
+                    'rating' => 5.00,
+                    'status' => UserStatus::Active,
+                ]
+            );
+
+            if (!Auth::check()) {
+                $defaultUser = User::where('email', 'buyer@sportpay.local')->first() ?? User::first();
+                if ($defaultUser) {
+                    Auth::login($defaultUser);
+                }
+            }
+
+            /** @var User|null $user */
+            $user = Auth::user();
+
+            $unreadMessagesCount = 0;
+            if ($user !== null) {
+                $unreadMessagesCount = Message::query()
+                    ->whereNull('read_at')
+                    ->where('user_id', '!=', $user->id)
+                    ->whereHas('order', function ($q) use ($user): void {
+                        $q->where('buyer_id', $user->id)
+                          ->orWhere('seller_id', $user->id);
+                    })
+                    ->count();
+            }
+
+            $disputedOrdersCount = Schema::hasTable('orders')
+                ? Order::where('status', OrderStatus::Disputed)->count()
+                : 0;
+
+            $view->with([
+                'user' => $user,
+                'allUsers' => User::orderBy('id')->get(),
+                'unreadMessagesCount' => $unreadMessagesCount,
+                'disputedOrdersCount' => $disputedOrdersCount,
+            ]);
+        });
+    }
+}
+==> app/Policies/OrderPolicy.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Policies;
+
+use App\Enums\OrderStatus;
+use App\Models\Order;
+use App\Models\User;
+use Illuminate\Auth\Access\Response;
+
+class OrderPolicy
+{
+    /**
+     * Просматривать сделку и читать чат могут покупатель, продавец и арбитр.
+     */
+    public function view(User $user, Order $order): Response
+    {
+        return $order->isParticipant($user)
+            ? Response::allow()
+            : Response::deny('У вас нет доступа к этой сделке.');
+    }
+
+    /**
+     * Писать в чат сделки могут только участники (покупатель, продавец и арбитр).
+     */
+    public function sendMessage(User $user, Order $order): Response
+    {
+        return $order->isParticipant($user)
+            ? Response::allow()
+            : Response::deny('У вас нет доступа к чату этой сделки.');
+    }
+
+    /**
+     * Подтвердить выполнение заказа может только покупатель.
+     */
+    public function confirm(User $user, Order $order): Response
+    {
+        return $order->buyer_id === $user->id
+            ? Response::allow()
+            : Response::deny('Только покупатель может подтвердить выполнение заказа.');
+    }
+
+    /**
+     * Добровольно отменить заказ без спора может только продавец (или арбитр при споре).
+     */
+    public function cancel(User $user, Order $order): Response
+    {
+        if ($order->seller_id === $user->id || $user->isArbiter()) {
+            return Response::allow();
+        }
+
+        if ($order->buyer_id === $user->id && $order->status === OrderStatus::Disputed) {
+            return Response::allow();
+        }
+
+        return Response::deny('Покупатель не может отменить оплаченный заказ напрямую. Откройте спор.');
+    }
+
+    /**
+     * Открыть спор может покупатель или продавец.
+     */
+    public function dispute(User $user, Order $order): Response
+    {
+        return ($order->buyer_id === $user->id || $order->seller_id === $user->id)
+            ? Response::allow()
+            : Response::deny('Только участник сделки может открыть спор.');
+    }
+
+    /**
+     * Вынести решение по спору может только официальный арбитр.
+     */
+    public function resolve(User $user, Order $order): Response
+    {
+        return $user->isArbiter()
+            ? Response::allow()
+            : Response::deny('Только официальный арбитр SportPay может выносить решение по спору.');
+    }
+}
+==> app/Policies/LotPolicy.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Policies;
+
+use App\Models\Lot;
+use App\Models\User;
+use Illuminate\Auth\Access\Response;
+
+class LotPolicy
+{
+    /**
+     * Редактировать и обновлять лот может только его владелец (продавец).
+     */
+    public function update(User $user, Lot $lot): Response
+    {
+        return $lot->seller_id === $user->id
+            ? Response::allow()
+            : Response::deny('Вы можете редактировать только свои лоты.');
+    }
+
+    /**
+     * Удалять лот может только его владелец или арбитр платформы.
+     */
+    public function delete(User $user, Lot $lot): Response
+    {
+        return ($lot->seller_id === $user->id || $user->isArbiter())
+            ? Response::allow()
+            : Response::deny('Вы можете удалять только свои лоты.');
+    }
+
+    /**
+     * Покупать лот может любой пользователь, кроме самого продавца.
+     */
+    public function purchase(User $user, Lot $lot): Response
+    {
+        return $lot->seller_id !== $user->id
+            ? Response::allow()
+            : Response::deny('Нельзя купить собственный лот.');
+    }
+}
+==> app/Models/Message.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+class Message extends Model
+{
+    use HasFactory;
+
+    protected $fillable = [
+        'order_id',
+        'user_id',
+        'body',
+        'is_system',
+        'read_at',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'is_system' => 'boolean',
+            'read_at' => 'datetime',
+        ];
+    }
+
+    public function order(): BelongsTo
+    {
+        return $this->belongsTo(Order::class, 'order_id');
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'user_id');
+    }
+}
+==> app/Models/Order.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use App\Enums\OrderStatus;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+
+class Order extends Model
+{
+    use HasFactory;
+
+    protected $fillable = [
+        'lot_id',
+        'buyer_id',
+        'seller_id',
+        'quantity',
+        'unit_price',
+        'total_price',
+        'status',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'quantity' => 'integer',
+            'unit_price' => 'decimal:2',
+            'total_price' => 'decimal:2',
+            'status' => OrderStatus::class,
+        ];
+    }
+
+    public function lot(): BelongsTo
+    {
+        return $this->belongsTo(Lot::class, 'lot_id');
+    }
+
+    public function buyer(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'buyer_id');
+    }
+
+    public function seller(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'seller_id');
+    }
+
+    public function review(): HasOne
+    {
+        return $this->hasOne(Review::class, 'order_id');
+    }
+
+    public function messages(): HasMany
+    {
+        return $this->hasMany(Message::class, 'order_id')->oldest();
+    }
+
+    public function latestMessage(): HasOne
+    {
+        return $this->hasOne(Message::class, 'order_id')->latestOfMany();
+    }
+
+    public function isParticipant(User $user): bool
+    {
+        return $this->buyer_id === $user->id
+            || $this->seller_id === $user->id
+            || $user->isArbiter();
+    }
+
+    public function counterpartyFor(User $user): User
+    {
+        return $this->buyer_id === $user->id ? $this->seller : $this->buyer;
+    }
+}
+==> app/Models/GlobalMessage.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+class GlobalMessage extends Model
+{
+    use HasFactory;
+
+    protected $fillable = [
+        'user_id',
+        'body',
+    ];
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'user_id');
+    }
+}
+==> app/Models/Review.php <==
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+class Review extends Model
+{
+    use HasFactory;
+
+    protected $fillable = [
+        'order_id',
+        'author_id',
+        'seller_id',
+        'lot_id',
+        'rating',
+        'comment',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'rating' => 'integer',
+        ];
+    }
+
+    public function order(): BelongsTo
+    {
+        return $this->belongsTo(Order::class, 'order_id');
+    }
+
+    public function author(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'author_id');
+    }
+
+    public function seller(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'seller_id');
+    }
+
+    public function lot(): BelongsTo
+    {
+        return $this->belongsTo(Lot::class, 'lot_id');
+    }
+}
+
+==> app/Models/User.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use App\Enums\UserStatus;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Foundation\Auth\User as Authenticatable;
+use Illuminate\Notifications\Notifiable;
+
+class User extends Authenticatable
+{
+    use HasFactory, Notifiable;
+
+    protected $fillable = [
+        'username',
+        'email',
+        'password',
+        'phone',
+        'wallet_balance',
+        'rating',
+        'status',
+    ];
+
+    protected $hidden = [
+        'password',
+        'remember_token',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'password' => 'hashed',
+            'wallet_balance' => 'decimal:2',
+            'rating' => 'decimal:2',
+            'status' => UserStatus::class,
+        ];
+    }
+
+    public function lots(): HasMany
+    {
+        return $this->hasMany(Lot::class, 'seller_id');
+    }
+
+    public function receivedReviews(): HasMany
+    {
+        return $this->hasMany(Review::class, 'seller_id');
+    }
+
+    public function globalMessages(): HasMany
+    {
+        return $this->hasMany(GlobalMessage::class, 'user_id');
+    }
+
+    public function isArbiter(): bool
+    {
+        return $this->email === 'arbiter@sportpay.local' || str_starts_with($this->username, 'Arbiter');
+    }
+}
+==> app/Models/WalletTransaction.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use App\Enums\TransactionStatus;
+use App\Enums\TransactionType;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+class WalletTransaction extends Model
+{
+    use HasFactory;
+
+    protected $fillable = [
+        'user_id',
+        'order_id',
+        'amount',
+        'type',
+        'balance_after',
+        'status',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'amount' => 'decimal:2',
+            'balance_after' => 'decimal:2',
+            'type' => TransactionType::class,
+            'status' => TransactionStatus::class,
+        ];
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'user_id');
+    }
+
+    public function order(): BelongsTo
+    {
+        return $this->belongsTo(Order::class, 'order_id');
+    }
+}
+==> app/Models/Lot.php <==
+<?php
+
+declare(strict_types=1);
+
+namespace App\Models;
+
+use App\Enums\LotStatus;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+
+class Lot extends Model
+{
+    use HasFactory;
+
+    protected $fillable = [
+        'seller_id',
+        'title',
+        'product_type',
+        'description',
+        'auto_delivery_text',
+        'price',
+        'stock_quantity',
+        'status',
+    ];
+
+    protected $hidden = [
+        'auto_delivery_text',
+    ];
+
+    public function hasAutoDelivery(): bool
+    {
+        return filled($this->auto_delivery_text);
+    }
+
+    protected function casts(): array
+    {
+        return [
+            'price' => 'decimal:2',
+            'stock_quantity' => 'integer',
+            'status' => LotStatus::class,
+        ];
+    }
+
+    public function seller(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'seller_id');
+    }
+
+    public function orders(): HasMany
+    {
+        return $this->hasMany(Order::class, 'lot_id');
+    }
+
+    public function reviews(): HasMany
+    {
+        return $this->hasMany(Review::class, 'lot_id');
+    }
+
+    /**
+     * Фильтрация активных лотов по категории и поисковой строке
+     */
+    public function scopeFilter(Builder $query, ?string $type, ?string $search): Builder
+    {
+        return $query
+            ->where('lots.stock_quantity', '>', 0)
+            ->where('lots.status', LotStatus::Active)
+            ->when($type, fn (Builder $q) => $q->where('lots.product_type', $type))
+            ->when($search, function (Builder $q) use ($search): void {
+                $term = '%' . trim($search) . '%';
+                $q->where(function (Builder $sub) use ($term): void {
+                    $sub->where('lots.title', 'like', $term)
+                        ->orWhere('lots.description', 'like', $term);
+                });
+            });
+    }
+
+    /**
+     * Безопасная сортировка по цене, рейтингу продавца или новизне
+     */
+    public function scopeSortBy(Builder $query, ?string $sort): Builder
+    {
+        return match ($sort) {
+            'price_asc' => $query->orderBy('lots.price', 'asc'),
+            'price_desc' => $query->orderBy('lots.price', 'desc'),
+            'rating_desc' => $query
+                ->join('users', 'lots.seller_id', '=', 'users.id')
+                ->select('lots.*')
+                ->orderByDesc('users.rating')
+                ->orderByDesc('lots.id'),
+            default => $query->latest('lots.id'),
+        };
+    }
+}
+==> routes/auth.php <==
+<?php
+
+use App\Http\Controllers\Auth\AuthenticatedSessionController;
+use App\Http\Controllers\Auth\ConfirmablePasswordController;
+use App\Http\Controllers\Auth\EmailVerificationNotificationController;
+use App\Http\Controllers\Auth\EmailVerificationPromptController;
+use App\Http\Controllers\Auth\NewPasswordController;
+use App\Http\Controllers\Auth\PasswordController;
+use App\Http\Controllers\Auth\PasswordResetLinkController;
+use App\Http\Controllers\Auth\RegisteredUserController;
+use App\Http\Controllers\Auth\VerifyEmailController;
+use Illuminate\Support\Facades\Route;
+
+Route::middleware('guest')->group(function () {
+    Route::get('register', [RegisteredUserController::class, 'create'])
+        ->name('register');
+
+    Route::post('register', [RegisteredUserController::class, 'store']);
+
+    Route::get('login', [AuthenticatedSessionController::class, 'create'])
+        ->name('login');
+
+    Route::post('login', [AuthenticatedSessionController::class, 'store']);
+
+    Route::get('forgot-password', [PasswordResetLinkController::class, 'create'])
+        ->name('password.request');
+
+    Route::post('forgot-password', [PasswordResetLinkController::class, 'store'])
+        ->name('password.email');
+
+    Route::get('reset-password/{token}', [NewPasswordController::class, 'create'])
+        ->name('password.reset');
+
+    Route::post('reset-password', [NewPasswordController::class, 'store'])
+        ->name('password.store');
+});
+
+Route::middleware('auth')->group(function () {
+    Route::get('verify-email', EmailVerificationPromptController::class)
+        ->name('verification.notice');
+
+    Route::get('verify-email/{id}/{hash}', VerifyEmailController::class)
+        ->middleware(['signed', 'throttle:6,1'])
+        ->name('verification.verify');
+
+    Route::post('email/verification-notification', [EmailVerificationNotificationController::class, 'store'])
+        ->middleware('throttle:6,1')
+        ->name('verification.send');
+
+    Route::get('confirm-password', [ConfirmablePasswordController::class, 'show'])
+        ->name('password.confirm');
+
+    Route::post('confirm-password', [ConfirmablePasswordController::class, 'store']);
+
+    Route::put('password', [PasswordController::class, 'update'])->name('password.update');
+
+    Route::post('logout', [AuthenticatedSessionController::class, 'destroy'])
+        ->name('logout');
+});
+
+==> routes/channels.php <==
+<?php
+
+use Illuminate\Support\Facades\Broadcast;
+
+Broadcast::channel('App.Models.User.{id}', function ($user, $id) {
+    return (int) $user->id === (int) $id;
+});
+
+==> routes/web.php <==
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\ChatController;
+use App\Http\Controllers\LotController;
+use App\Http\Controllers\MarketplaceController;
+use App\Http\Controllers\OrderController;
+use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\WalletController;
+use App\Http\Controllers\ArbitrationController;
+use App\Http\Controllers\GlobalChatController;
+
+Route::get('/', [MarketplaceController::class, 'index'])->name('home');
+Route::post('/switch-user', [MarketplaceController::class, 'switchUser'])->name('user.switch');
+
+Route::get('/users/{profileUser}', [ProfileController::class, 'show'])->name('users.show');
+
+Route::get('/lots/{lot}', [LotController::class, 'show'])->name('lots.show');
+Route::post('/lots', [LotController::class, 'store'])->name('lots.store');
+Route::get('/lots/{lot}/edit', [LotController::class, 'edit'])->name('lots.edit');
+Route::put('/lots/{lot}', [LotController::class, 'update'])->name('lots.update');
+Route::delete('/lots/{lot}', [LotController::class, 'destroy'])->name('lots.destroy');
+Route::post('/lots/{lot}/purchase', [OrderController::class, 'purchase'])->name('lots.purchase');
+
+Route::get('/messages', [ChatController::class, 'index'])->name('chat.index');
+
+Route::get('/orders/{order}', [OrderController::class, 'show'])->name('orders.show');
+Route::post('/orders/{order}/confirm', [OrderController::class, 'confirm'])->name('orders.confirm');
+Route::post('/orders/{order}/cancel', [OrderController::class, 'cancel'])->name('orders.cancel');
+Route::post('/orders/{order}/messages', [ChatController::class, 'store'])->name('orders.messages.store');
+Route::get('/orders/{order}/messages', [ChatController::class, 'messages'])->name('orders.messages.index');
+Route::post('/orders/{order}/dispute', [OrderController::class, 'dispute'])->name('orders.dispute');
+
+Route::get('/wallet', [WalletController::class, 'index'])->name('wallet.index');
+Route::post('/wallet/deposit', [WalletController::class, 'deposit'])->name('wallet.deposit');
+Route::post('/wallet/withdraw', [WalletController::class, 'withdraw'])->name('wallet.withdraw');
+
+Route::get('/arbitration', [ArbitrationController::class, 'index'])->name('arbitration.index');
+Route::post('/orders/{order}/resolve', [ArbitrationController::class, 'resolve'])->name('orders.resolve');
+
+Route::get('/global-chat', [GlobalChatController::class, 'index'])->name('chat.global');
+Route::get('/global-chat/messages', [GlobalChatController::class, 'messages'])->name('chat.global.messages');
+Route::post('/global-chat/messages', [GlobalChatController::class, 'store'])->name('chat.global.store');
+==> routes/console.php <==
+<?php
+
+use Illuminate\Foundation\Inspiring;
+use Illuminate\Support\Facades\Artisan;
+
+Artisan::command('inspire', function () {
+    $this->comment(Inspiring::quote());
+})->purpose('Display an inspiring quote');
+
+==> resources/views/marketplace/index.blade.php <==
+@extends('layouts.app')
+
+@section('content')
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <div class="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+            <h2 class="text-lg font-bold text-white">Витрина спортивных лотов ({{ $lots->count() }})</h2>
+            <div class="flex flex-wrap gap-1.5 text-xs">
+                <a href="{{ route('home', array_filter(['search' => request('search'), 'sort' => request('sort')])) }}" class="px-3 py-1.5 rounded-lg {{ !request('type') ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300' }}">Все</a>
+                <a href="{{ route('home', array_filter(['type' => 'training_plan', 'search' => request('search'), 'sort' => request('sort')])) }}" class="px-3 py-1.5 rounded-lg {{ request('type') === 'training_plan' ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300' }}">Программы</a>
+                <a href="{{ route('home', array_filter(['type' => 'coaching', 'search' => request('search'), 'sort' => request('sort')])) }}" class="px-3 py-1.5 rounded-lg {{ request('type') === 'coaching' ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300' }}">Тренерство</a>
+                <a href="{{ route('home', array_filter(['type' => 'race_slot', 'search' => request('search'), 'sort' => request('sort')])) }}" class="px-3 py-1.5 rounded-lg {{ request('type') === 'race_slot' ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300' }}">Слоты</a>
+                <a href="{{ route('home', array_filter(['type' => 'equipment', 'search' => request('search'), 'sort' => request('sort')])) }}" class="px-3 py-1.5 rounded-lg {{ request('type') === 'equipment' ? 'bg-emerald-500 text-slate-950 font-bold' : 'bg-slate-800 text-slate-300' }}">Экипировка</a>
+            </div>
+        </div>
+
+        <form action="{{ route('home') }}" method="GET" class="grid grid-cols-1 sm:grid-cols-12 gap-2 pt-1">
+            @if(request('type'))
+                <input type="hidden" name="type" value="{{ request('type') }}">
+            @endif
+            <div class="sm:col-span-6 relative">
+                <input type="text" id="lot-search-input" name="search" value="{{ request('search') }}" placeholder="Поиск по названию или описанию..." class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2 text-xs text-white focus:outline-none focus:border-emerald-500">
+            </div>
+            <div class="sm:col-span-4">
+                <select name="sort" onchange="this.form.submit()" class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200">
+                    <option value="latest" @selected(request('sort', 'latest') === 'latest')>Сначала новые</option>
+                    <option value="price_asc" @selected(request('sort') === 'price_asc')>Дешевле (Цена ↑)</option>
+                    <option value="price_desc" @selected(request('sort') === 'price_desc')>Дороже (Цена ↓)</option>
+                    <option value="rating_desc" @selected(request('sort') === 'rating_desc')>По рейтингу тренера ★</option>
+                </select>
+            </div>
+            <div class="sm:col-span-2 flex gap-1">
+                <button type="submit" class="flex-1 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-emerald-400">Найти</button>
+                @if(request()->anyFilled(['search', 'type', 'sort']))
+                    <a href="{{ route('home') }}" title="Сбросить фильтры" class="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-rose-500/20 text-xs text-slate-400 hover:text-rose-300">✕</a>
+                @endif
+            </div>
+        </form>
+
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse text-sm">
+                <thead>
+                    <tr class="border-b border-slate-800 text-xs text-slate-400 uppercase">
+                        <th class="py-3 px-2">Тип</th>
+                        <th class="py-3 px-2">Лот</th>
+                        <th class="py-3 px-2">Продавец</th>
+                        <th class="py-3 px-2 text-right">Цена</th>
+                        <th class="py-3 px-2 text-right">Действие</th>
+                    </tr>
+                </thead>
+                <tbody id="lots-table-body" class="divide-y divide-slate-800/70">
+                    @if($lots->isEmpty())
+                        <tr>
+                            <td colspan="5" class="py-8 text-center text-slate-500 text-xs">По вашему запросу лотов не найдено.</td>
+                        </tr>
+                    @else
+                        @foreach ($lots as $lot)
+                        <tr class="lot-row hover:bg-slate-800/40 transition">
+                            <td class="py-3 px-2">
+                                <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-300">{{ $lot->product_type }}</span>
+                            </td>
+                            <td class="py-3 px-2">
+                                <div class="font-semibold text-white flex items-center gap-1.5">
+                                    <a href="{{ route('lots.show', $lot) }}" class="hover:text-emerald-400 hover:underline transition">
+                                        {{ $lot->title }}
+                                    </a>
+                                    @if($lot->hasAutoDelivery())
+                                        <span title="Мгновенная автовыдача после оплаты" class="px-1.5 py-0.5 text-[10px] font-extrabold rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                            ⚡ Автовыдача
+                                        </span>
+                                    @endif
+                                </div>
+                                <a href="{{ route('lots.show', $lot) }}" class="block text-xs text-slate-400 hover:text-slate-300">
+                                    {{ $lot->description }} ({{ $lot->stock_quantity }} шт.)
+                                </a>
+                            </td>
+                            <td class="py-3 px-2">
+                                <a href="{{ route('users.show', $lot->seller_id) }}" class="font-medium text-emerald-400 hover:underline">{{ $lot->seller->username ?? '-' }}</a>
+                                <div class="text-xs text-amber-400">★ {{ number_format((float) ($lot->seller->rating ?? 5), 2) }}</div>
+                            </td>
+                            <td class="py-3 px-2 text-right font-bold text-emerald-400">{{ number_format((float) $lot->price, 0, '.', ' ') }} ₽</td>
+                            <td class="py-3 px-2 text-right">
+                                @if($user && $lot->seller_id !== $user->id)
+                                    <div class="flex items-center justify-end gap-1.5">
+                                        <a href="{{ route('lots.show', $lot) }}" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium">Открыть</a>
+                                        <form action="{{ route('lots.purchase', $lot) }}" method="POST">
+                                            @csrf
+                                            <button type="submit" class="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs">Купить</button>
+                                        </form>
+                                    </div>
+                                @else
+                                    <div class="flex items-center justify-end gap-1.5">
+                                        <a href="{{ route('lots.show', $lot) }}" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-300">👁</a>
+                                        <a href="{{ route('lots.edit', $lot) }}" class="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-200">✎ Изм.</a>
+                                        <form action="{{ route('lots.destroy', $lot) }}" method="POST">
+                                            @csrf
+                                            @method('DELETE')
+                                            <button type="submit" class="px-2.5 py-1 rounded-lg bg-rose-500/10 text-rose-300 text-xs">✕</button>
+                                        </form>
+                                    </div>
+                                @endif
+                            </td>
+                        </tr>
+                        @endforeach
+                    @endif
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="space-y-6">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5">
+            <h3 class="text-base font-bold text-white mb-3">Кошелек</h3>
+            <div class="grid grid-cols-2 gap-3 mb-4">
+                <form action="{{ route('wallet.deposit') }}" method="POST" class="space-y-2">
+                    @csrf
+                    <input type="number" name="amount" value="2000" min="100" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-white">
+                    <button type="submit" class="w-full py-2 rounded-lg bg-emerald-500 text-slate-950 font-bold text-xs">+ Пополнить</button>
+                </form>
+                <form action="{{ route('wallet.withdraw') }}" method="POST" class="space-y-2">
+                    @csrf
+                    <input type="number" name="amount" value="1000" min="100" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-white">
+                    <button type="submit" class="w-full py-2 rounded-lg bg-slate-800 text-slate-200 font-bold text-xs">→ Вывести</button>
+                </form>
+            </div>
+            <div class="space-y-1.5 max-h-40 overflow-y-auto">
+                @foreach ($myTransactions as $tx)
+                    <div class="flex items-center justify-between text-xs py-1.5 px-2 rounded bg-slate-800/60">
+                        <span class="font-semibold text-slate-200">{{ $tx->type->label() }}</span>
+                        <span class="font-bold {{ $tx->amount >= 0 ? 'text-emerald-400' : 'text-rose-400' }}">
+                            {{ number_format((float) $tx->amount, 0, '.', ' ') }} ₽
+                        </span>
+                    </div>
+                @endforeach
+            </div>
+        </div>
+
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5">
+            <h3 class="text-base font-bold text-white mb-3">Выставить лот</h3>
+            <form action="{{ route('lots.store') }}" method="POST" class="space-y-3 text-sm">
+                @csrf
+                <input type="text" name="title" required placeholder="Название лота..." class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white">
+                <div class="grid grid-cols-2 gap-2">
+                    <select name="product_type" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white">
+                        <option value="training_plan">Программа</option>
+                        <option value="coaching">Тренерство</option>
+                        <option value="race_slot">Слот на забег</option>
+                        <option value="equipment">Экипировка</option>
+                    </select>
+                    <input type="number" name="price" value="2000" min="50" required class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white">
+                </div>
+                <input type="hidden" name="stock_quantity" value="5">
+                <textarea name="description" rows="2" required placeholder="Описание..." class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white"></textarea>
+                <textarea name="auto_delivery_text" rows="2" placeholder="⚡ Секретный текст/ссылка для автовыдачи (необязательно)..." class="w-full bg-slate-950 border border-emerald-500/40 rounded-lg px-3 py-2 text-xs text-emerald-300 placeholder-slate-500"></textarea>
+                <button type="submit" class="w-full py-2.5 rounded-xl bg-indigo-500 text-white font-bold text-xs">Опубликовать</button>
+            </form>
+        </div>
+    </div>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5">
+        <h3 class="text-base font-bold text-white mb-3">Мои покупки</h3>
+        <div class="space-y-3">
+            @foreach ($myPurchases as $order)
+                <div class="p-3.5 rounded-xl bg-slate-800/60 border border-slate-700/70 flex items-center justify-between">
+                    <div>
+                        <a href="{{ route('orders.show', $order) }}" class="font-bold text-emerald-400 hover:underline text-sm">
+                            Заказ #{{ $order->id }}: {{ $order->lot->title ?? 'Лот' }}
+                        </a>
+                        <div class="text-xs text-slate-400">Продавец: {{ $order->seller->username ?? '-' }} • {{ number_format((float) $order->total_price, 0, '.', ' ') }} ₽</div>
+                    </div>
+                    <a href="{{ route('orders.show', $order) }}" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs text-white font-semibold">💬 Чат сделки</a>
+                </div>
+            @endforeach
+        </div>
+    </div>
+
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5">
+        <h3 class="text-base font-bold text-white mb-3">Мои продажи</h3>
+        <div class="space-y-3">
+            @foreach ($mySales as $order)
+                <div class="p-3.5 rounded-xl bg-slate-800/60 border border-slate-700/70 flex items-center justify-between">
+                    <div>
+                        <a href="{{ route('orders.show', $order) }}" class="font-bold text-emerald-400 hover:underline text-sm">
+                            Заказ #{{ $order->id }}: {{ $order->lot->title ?? 'Лот' }}
+                        </a>
+                        <div class="text-xs text-slate-400">Покупатель: {{ $order->buyer->username ?? '-' }} • +{{ number_format((float) $order->total_price, 0, '.', ' ') }} ₽</div>
+                    </div>
+                    <a href="{{ route('orders.show', $order) }}" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs text-white font-semibold">💬 Чат сделки</a>
+                </div>
+            @endforeach
+        </div>
+    </div>
+</div>
+
+<script>
+document.getElementById('lot-search-input')?.addEventListener('input', function (e) {
+    const term = e.target.value.toLowerCase();
+    document.querySelectorAll('#lots-table-body .lot-row').forEach(row => {
+        row.style.display = row.textContent.toLowerCase().includes(term) ? '' : 'none';
+    });
+});
+</script>
+@endsection
+
+==> resources/views/wallet/index.blade.php <==
+@extends('layouts.app')
+
+@section('title', 'Финансы и кошелек — SportPay')
+
+@section('content')
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <!-- Левая колонка: Сводка по балансу и операции -->
+    <div class="space-y-6">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
+            <div class="text-xs font-bold uppercase tracking-wider text-slate-400">Доступный баланс</div>
+            <div class="text-3xl font-extrabold text-emerald-400">
+                {{ number_format((float) $user->wallet_balance, 2, '.', ' ') }} ₽
+            </div>
+
+            <div class="grid grid-cols-2 gap-3 pt-3 border-t border-slate-800 text-xs">
+                <div class="p-3 rounded-xl bg-slate-950 border border-slate-800">
+                    <div class="text-slate-400">Заморожено в покупках</div>
+                    <div class="font-bold text-amber-400 text-sm mt-1">
+                        {{ number_format($frozenAsBuyer, 2, '.', ' ') }} ₽
+                    </div>
+                </div>
+                <div class="p-3 rounded-xl bg-slate-950 border border-slate-800">
+                    <div class="text-slate-400">Ожидает выплаты (−5%)</div>
+                    <div class="font-bold text-indigo-400 text-sm mt-1">
+                        {{ number_format($pendingAsSeller, 2, '.', ' ') }} ₽
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Форма пополнения -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
+            <h2 class="text-sm font-extrabold uppercase tracking-wider text-emerald-400">Пополнить баланс</h2>
+            <form action="{{ route('wallet.deposit') }}" method="POST" class="space-y-3">
+                @csrf
+                <div>
+                    <label class="block text-xs text-slate-400 mb-1">Сумма пополнения (₽)</label>
+                    <input type="number" name="amount" value="2500" min="100" max="500000" step="100" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white font-bold focus:outline-none focus:border-emerald-500">
+                </div>
+                <button type="submit" class="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs transition">
+                    + Пополнить кошелек
+                </button>
+            </form>
+        </div>
+
+        <!-- Форма вывода -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4">
+            <h2 class="text-sm font-extrabold uppercase tracking-wider text-slate-300">Вывод средств</h2>
+            <form action="{{ route('wallet.withdraw') }}" method="POST" class="space-y-3">
+                @csrf
+                <div>
+                    <label class="block text-xs text-slate-400 mb-1">Сумма к выводу (₽)</label>
+                    <input type="number" name="amount" value="1000" min="100" max="500000" step="100" required class="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white font-bold focus:outline-none focus:border-indigo-500">
+                </div>
+                <button type="submit" class="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-bold text-xs transition">
+                    → Вывести средства
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Правая колонка: Аудиторская история транзакций -->
+    <div class="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden flex flex-col">
+        <div class="p-5 border-b border-slate-800 flex items-center justify-between">
+            <h1 class="text-base font-extrabold text-white">История финансовых операций</h1>
+            <span class="text-xs text-slate-400">Последние {{ $transactions->count() }} записей</span>
+        </div>
+
+        <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse text-sm">
+                <thead>
+                    <tr class="border-b border-slate-800 text-[11px] uppercase tracking-wider text-slate-400 bg-slate-950/60">
+                        <th class="py-3 px-4">ID</th>
+                        <th class="py-3 px-4">Тип операции</th>
+                        <th class="py-3 px-4">Заказ</th>
+                        <th class="py-3 px-4 text-right">Сумма</th>
+                        <th class="py-3 px-4 text-right">Остаток после</th>
+                        <th class="py-3 px-4 text-right">Дата</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-800/70">
+                    @if($transactions->isEmpty())
+                        <tr>
+                            <td colspan="6" class="py-12 text-center text-xs text-slate-500">
+                                Финансовых операций пока не было.
+                            </td>
+                        </tr>
+                    @else
+                        @foreach($transactions as $tx)
+                            @php
+                                $isPositive = (float) $tx->amount >= 0;
+                                $typeLabels = [
+                                    'deposit' => 'Пополнение / Возврат',
+                                    'withdraw' => 'Вывод средств',
+                                    'purchase' => 'Оплата заказа (Эскроу)',
+                                    'payout' => 'Выплата продавцу (−5%)',
+                                ];
+                                $typeKey = $tx->type instanceof \BackedEnum ? $tx->type->value : (string) $tx->type;
+                            @endphp
+                            <tr class="hover:bg-slate-800/40 transition">
+                                <td class="py-3.5 px-4 text-xs text-slate-500 font-mono">#{{ $tx->id }}</td>
+                                <td class="py-3.5 px-4 font-medium text-slate-200">
+                                    {{ $typeLabels[$typeKey] ?? $typeKey }}
+                                </td>
+                                <td class="py-3.5 px-4 text-xs">
+                                    @if($tx->order_id)
+                                        <a href="{{ route('orders.show', $tx->order_id) }}" class="text-indigo-400 hover:underline font-bold">
+                                            Сделка #{{ $tx->order_id }}
+                                        </a>
+                                    @else
+                                        <span class="text-slate-600">—</span>
+                                    @endif
+                                </td>
+                                <td class="py-3.5 px-4 text-right font-extrabold {{ $isPositive ? 'text-emerald-400' : 'text-rose-400' }}">
+                                    {{ $isPositive ? '+' : '' }}{{ number_format((float) $tx->amount, 2, '.', ' ') }} ₽
+                                </td>
+                                <td class="py-3.5 px-4 text-right text-xs font-semibold text-slate-300">
+                                    {{ number_format((float) $tx->balance_after, 2, '.', ' ') }} ₽
+                                </td>
+                                <td class="py-3.5 px-4 text-right text-xs text-slate-400">
+                                    {{ $tx->created_at?->format('d.m H:i') }}
+                                </td>
+                            </tr>
+                        @endforeach
+                    @endif
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+@endsection
+==> resources/views/lots/edit.blade.php <==
+@extends('layouts.app')
+
+@section('title', "Редактировать лот #{$lot->id} — SportPay")
+
+@section('content')
+<div class="max-w-2xl mx-auto bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-6">
+    <div class="flex items-center justify-between border-b border-slate-800 pb-4">
+        <div>
+            <h1 class="text-xl font-extrabold text-white">Редактирование лота #{{ $lot->id }}</h1>
+            <p class="text-xs text-slate-400 mt-0.5">Измените параметры предложения или снимите его с продажи</p>
+        </div>
+        <a href="{{ route('home') }}" class="text-xs text-slate-400 hover:text-white">← Назад на витрину</a>
+    </div>
+
+    <form action="{{ route('lots.update', $lot) }}" method="POST" class="space-y-4 text-sm">
+        @csrf
+        @method('PUT')
+
+        <div>
+            <label class="text-xs text-slate-400 font-semibold">Название лота</label>
+            <input type="text" name="title" value="{{ old('title', $lot->title) }}" required class="w-full mt-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 text-white">
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div>
+                <label class="text-xs text-slate-400 font-semibold">Категория</label>
+                <select name="product_type" class="w-full mt-1 bg-slate-800 border border-slate-700 rounded-xl px-3 py-2.5 text-white">
+                    <option value="training_plan" @selected($lot->product_type === 'training_plan')>Программа</option>
+                    <option value="coaching" @selected($lot->product_type === 'coaching')>Тренерство</option>
+                    <option value="race_slot" @selected($lot->product_type === 'race_slot')>Слот на забег</option>
+                    <option value="equipment" @selected($lot->product_type === 'equipment')>Экипировка</option>
+                </select>
+            </div>
+
+            <div>
+                <label class="text-xs text-slate-400 font-semibold">Цена (₽)</label>
+                <input type="number" name="price" value="{{ old('price', (float) $lot->price) }}" min="50" step="10" required class="w-full mt-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 text-white">
+            </div>
+
+            <div>
+                <label class="text-xs text-slate-400 font-semibold">Остаток (шт.)</label>
+                <input type="number" name="stock_quantity" value="{{ old('stock_quantity', $lot->stock_quantity) }}" min="0" required class="w-full mt-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 text-white">
+            </div>
+        </div>
+
+        <div>
+            <label class="text-xs text-slate-400 font-semibold">Подробное описание</label>
+            <textarea name="description" rows="4" required class="w-full mt-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 text-white">{{ old('description', $lot->description) }}</textarea>
+        </div>
+
+        <div class="flex items-center justify-between pt-4 border-t border-slate-800">
+        <textarea name="auto_delivery_text" rows="2" placeholder="⚡ Секретный текст/ссылка для автовыдачи (необязательно)..." class="w-full bg-slate-950 border border-emerald-500/40 rounded-lg px-3 py-2 text-xs text-emerald-300 placeholder-slate-500"></textarea>
+            <button type="submit" class="px-6 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs">
+                Сохранить изменения
+            </button>
+        </div>
+    </form>
+
+    <!-- Отдельная форма удаления лота -->
+    <div class="pt-4 border-t border-slate-800 flex items-center justify-between">
+        <span class="text-xs text-slate-400">Хотите убрать лот с витрины?</span>
+        <form action="{{ route('lots.destroy', $lot) }}" method="POST" onsubmit="return confirm('Удалить этот лот?');">
+            @csrf
+            @method('DELETE')
+            <button type="submit" class="px-4 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 font-bold text-xs">
+                Удалить лот
+            </button>
+        </form>
+    </div>
+</div>
+@endsection
+==> resources/views/layouts/app.blade.php <==
+<!DOCTYPE html>
+<html lang="ru" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>@yield('title', 'SportPay — Биржа спортивных товаров и услуг')</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://js.pusher.com/8.2.0/pusher.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/laravel-echo@1.16.1/dist/echo.iife.js"></script>
+    <script>
+    window.Pusher = Pusher;
+    window.Echo = new Echo({
+        broadcaster: 'reverb',
+        key: '{{ config("broadcasting.connections.reverb.key", "sportpay-key") }}',
+        wsHost: '{{ config("broadcasting.connections.reverb.options.host", "127.0.0.1") }}',
+        wsPort: {{ (int) config("broadcasting.connections.reverb.options.port", 8080) }},
+        wssPort: {{ (int) config("broadcasting.connections.reverb.options.port", 8080) }},
+        forceTLS: false,
+        enabledTransports: ['ws', 'wss'],
+    });
+    </script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans">
+
+<header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-30">
+    <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-4">
+        <div class="flex items-center gap-3">
+            <a href="{{ route('home') }}" class="text-2xl font-extrabold tracking-tight text-emerald-400 mr-2">
+                SPORT<span class="text-white">PAY</span>
+            </a>
+
+            <a href="{{ route('home') }}" class="text-xs px-3 py-2 rounded-lg {{ request()->routeIs('home') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
+                Каталог лотов
+            </a>
+
+            <a href="{{ route('chat.index') }}" class="text-xs px-3.5 py-2 rounded-lg {{ request()->routeIs('chat.*') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
+                💬 Сообщения
+            </a>
+
+            <a href="{{ route('chat.global') }}" class="text-xs px-3.5 py-2 rounded-lg {{ request()->routeIs('chat.global') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
+                🌍 Общий чат
+            </a>
+
+            <a href="{{ route('wallet.index') }}" class="text-xs px-3.5 py-2 rounded-lg {{ request()->routeIs('wallet.*') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
+                💳 Финансы
+            </a>
+
+            <a href="{{ route('arbitration.index') }}" class="text-xs px-3.5 py-2 rounded-lg {{ request()->routeIs('arbitration.*') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
+                ⚖️ Арбитраж
+            </a>
+        </div>
+
+        @php
+            $allUsers = $users ?? \App\Models\User::orderBy('id')->get();
+        @endphp
+        <div class="flex items-center gap-3">
+            @if(isset($user))
+                <a href="{{ route('wallet.index') }}" class="bg-slate-800/90 hover:bg-slate-800 px-3.5 py-1.5 rounded-xl border border-slate-700 transition">
+                    <div class="text-[10px] text-slate-400">Баланс кошелька</div>
+                    <div class="font-extrabold text-emerald-400 text-xs">
+                        {{ number_format((float) $user->wallet_balance, 2, '.', ' ') }} ₽
+                    </div>
+                </a>
+            @endif
+
+            @if($allUsers->isNotEmpty())
+                <form action="{{ route('user.switch') }}" method="POST" class="flex items-center gap-2 bg-slate-800/90 px-3 py-1.5 rounded-xl border border-slate-700">
+                    @csrf
+                    <label for="switch-user-select" class="text-[10px] text-slate-400 uppercase font-bold">Аккаунт:</label>
+                    <select id="switch-user-select" name="user_id" onchange="this.form.submit()" class="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white font-semibold focus:outline-none focus:border-emerald-500 cursor-pointer">
+                        @foreach ($allUsers as $u)
+                            <option value="{{ $u->id }}" @selected(isset($user) && $user->id === $u->id)>
+                                {{ $u->username ?? $u->name ?? ('User #' . $u->id) }} ({{ number_format((float) $u->wallet_balance, 0, '.', ' ') }} ₽)
+                            </option>
+                        @endforeach
+                    </select>
+                </form>
+            @endif
+        </div>
+    </div>
+</header>
+
+<main class="max-w-7xl mx-auto px-4 py-6 space-y-6">
+    @if(session('success'))
+        <div class="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-sm font-medium">
+            ✓ {{ session('success') }}
+        </div>
+    @endif
+
+    @if(session('error'))
+        <div class="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm font-medium">
+            ✕ {{ session('error') }}
+        </div>
+    @endif
+
+    @if($errors->any())
+        <div class="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm">
+            {{ $errors->first() }}
+        </div>
+    @endif
+
+    @yield('content')
+</main>
+</body>
+</html>
+
+==> resources/views/orders/show.blade.php <==
+<script>
+(function () {
+    const box = document.getElementById('order-messages-box');
+    const form = document.getElementById('order-chat-form');
+    const input = document.getElementById('order-chat-input');
+    const currentUserId = {{ (int) $user->id }};
+    const orderId = {{ (int) $order->id }};
+    const pollUrl = "{{ route('orders.messages.index', $order) }}";
+
+    let lastMessageId = {{ (int) ($order->messages->last()?->id ?? 0) }};
+
+    function forceScrollBottom() {
+        if (!box) return;
+        box.scrollTop = box.scrollHeight + 9999;
+    }
+
+    forceScrollBottom();
+    window.addEventListener('load', () => {
+        forceScrollBottom();
+        setTimeout(forceScrollBottom, 120);
+    });
+
+    function renderOrderMessage(msg) {
+        const msgId = Number(msg.id || 0);
+        if (msgId > 0 && box.querySelector(`[data-msg-id="${msgId}"]`)) {
+            return;
+        }
+        if (msgId > lastMessageId) {
+            lastMessageId = msgId;
+        }
+
+        const emptyPlaceholder = document.getElementById('empty-order-chat');
+        if (emptyPlaceholder) emptyPlaceholder.remove();
+
+        const wrapper = document.createElement('div');
+        if (msgId > 0) wrapper.setAttribute('data-msg-id', String(msgId));
+
+        if (msg.is_system) {
+            wrapper.className = 'p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-center text-xs text-amber-300';
+            wrapper.textContent = '🛡️ ' + msg.body;
+        } else {
+            const isMe = Number(msg.user_id) === currentUserId;
+            wrapper.className = `flex flex-col ${isMe ? 'items-end' : 'items-start'}`;
+
+            const meta = document.createElement('div');
+            meta.className = 'text-[11px] text-slate-400 mb-1';
+            meta.textContent = `${msg.username} • ${msg.time}`;
+
+            const bubble = document.createElement('div');
+            bubble.className = `max-w-md px-4 py-2.5 rounded-2xl text-sm ${isMe ? 'bg-emerald-500 text-slate-950 font-medium' : 'bg-slate-800 text-slate-100 border border-slate-700'}`;
+            bubble.textContent = msg.body;
+
+            wrapper.appendChild(meta);
+            wrapper.appendChild(bubble);
+        }
+
+        box.appendChild(wrapper);
+        forceScrollBottom();
+    }
+
+    form.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        const body = input.value.trim();
+        if (!body) return;
+
+        input.value = '';
+        input.focus();
+
+        try {
+            const response = await fetch(form.action, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-TOKEN': '{{ csrf_token() }}',
+                    'Accept': 'application/json'
+                },
+                body: JSON.stringify({ body })
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                if (data.message) renderOrderMessage(data.message);
+            }
+        } catch (err) {
+            console.error('Ошибка отправки:', err);
+        }
+    });
+
+    if (window.Echo) {
+        window.Echo.channel(`orders.${orderId}`)
+            .listen('.order.message.sent', (data) => renderOrderMessage(data));
+    }
+
+    setInterval(async () => {
+        try {
+            const res = await fetch(`${pollUrl}?after_id=${lastMessageId}`, {
+                headers: { 'Accept': 'application/json' }
+            });
+            if (res.ok) {
+                const data = await res.json();
+                if (Array.isArray(data.messages)) {
+                    data.messages.forEach(renderOrderMessage);
+                }
+            }
+        } catch (e) {}
+    }, 2000);
+})();
+</script>
+==> resources/views/arbitration/index.blade.php <==
+@extends('layouts.app')
+
+@section('title', 'Панель Арбитра — SportPay')
+
+@section('content')
+<div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-6">
+    <div class="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
+        <div>
+            <h1 class="text-xl font-extrabold text-white flex items-center gap-2">
+                ⚖️ Панель Арбитража SportPay
+            </h1>
+            <p class="text-xs text-slate-400 mt-1">
+                Разрешение открытых споров между покупателями и продавцами. Средства находятся в эскроу-холде.
+            </p>
+        </div>
+
+        @if(!$user->isArbiter())
+            <div class="px-4 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300">
+                Для вынесения решений переключитесь в шапке на аккаунт <b>Arbiter_Judge</b>
+            </div>
+        @else
+            <div class="px-4 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300 font-bold">
+                ✓ Вы вошли как официальный Арбитр ({{ $user->username }})
+            </div>
+        @endif
+    </div>
+
+    @if($disputedOrders->isEmpty())
+        <div class="py-12 text-center text-sm text-slate-500">
+            Активных споров сейчас нет. Все сделки проходят штатно!
+        </div>
+    @else
+        <div class="space-y-4">
+            @foreach($disputedOrders as $order)
+                <div class="p-5 rounded-2xl bg-slate-950/70 border border-rose-500/30 space-y-4">
+                    <div class="flex flex-wrap items-center justify-between gap-3">
+                        <div class="flex items-center gap-3">
+                            <span class="px-2.5 py-1 rounded text-xs font-extrabold bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                                СПОР ПО СДЕЛКЕ #{{ $order->id }}
+                            </span>
+                            <span class="font-bold text-white text-base">{{ $order->lot->title ?? 'Лот' }}</span>
+                        </div>
+                        <div class="text-lg font-extrabold text-emerald-400">
+                            В холде: {{ number_format((float) $order->total_price, 2, '.', ' ') }} ₽
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs bg-slate-900 p-3.5 rounded-xl border border-slate-800">
+                        <div>
+                            <span class="text-slate-400">Покупатель:</span>
+                            <a href="{{ route('users.show', $order->buyer_id) }}" class="ml-1 font-bold text-indigo-400 hover:underline">{{ $order->buyer->username }}</a>
+                        </div>
+                        <div>
+                            <span class="text-slate-400">Продавец:</span>
+                            <a href="{{ route('users.show', $order->seller_id) }}" class="ml-1 font-bold text-emerald-400 hover:underline">{{ $order->seller->username }}</a>
+                        </div>
+                        <div class="md:text-right">
+                            <a href="{{ route('orders.show', $order) }}" class="text-amber-400 font-bold hover:underline">
+                                💬 Открыть полный чат сделки →
+                            </a>
+                        </div>
+                    </div>
+
+                    @if($order->latestMessage)
+                        <div class="text-xs text-slate-300 bg-slate-900/80 px-3.5 py-2.5 rounded-xl border border-slate-800">
+                            <span class="text-slate-500 font-semibold">Последнее сообщение в чате:</span>
+                            {{ $order->latestMessage->body }}
+                        </div>
+                    @endif
+
+                    @if($user->isArbiter())
+                        <form action="{{ route('orders.resolve', $order) }}" method="POST" class="pt-3 border-t border-slate-800 flex flex-wrap items-center gap-3">
+                            @csrf
+                            <input type="text" name="comment" placeholder="Официальный комментарий арбитра к решению..." class="flex-1 min-w-[240px] bg-slate-900 border border-slate-700 rounded-xl px-3.5 py-2 text-xs text-white">
+
+                            <button type="submit" name="decision" value="refund_buyer" class="px-4 py-2 rounded-xl bg-rose-500 hover:bg-rose-400 text-white font-extrabold text-xs">
+                                ↺ Вернуть 100% покупателю ({{ number_format((float) $order->total_price, 0, '.', ' ') }} ₽)
+                            </button>
+
+                            <button type="submit" name="decision" value="release_seller" class="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs">
+                                ✓ Выплатить продавцу (-5% комиссия)
+                            </button>
+                        </form>
+                    @endif
+                </div>
+            @endforeach
+        </div>
+    @endif
+</div>
+@endsection
+==> resources/views/chat/global.blade.php <==
+@extends('layouts.app')
+
+@section('title', 'Общий чат — SportPay')
+
+@section('content')
+<div class="max-w-4xl mx-auto bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden flex flex-col h-[74vh]">
+    <div class="p-4 border-b border-slate-800 bg-slate-900/80 flex items-center justify-between">
+        <h1 class="text-base font-extrabold text-white flex items-center gap-2">
+            🌍 Общий спортивный чат SportPay
+        </h1>
+        <div class="flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+            <span class="text-xs text-slate-400">Живой эфир</span>
+        </div>
+    </div>
+
+    <!-- Лента сообщений -->
+    <div id="chat-messages" style="overflow-y: auto; scroll-behavior: auto;" class="flex-1 p-4 space-y-3 overflow-y-auto">
+        @if($messages->isEmpty())
+            <div id="no-messages" class="text-center text-sm text-slate-500 py-12">
+                Сообщений пока нет. Напишите первым!
+            </div>
+        @else
+            @foreach($messages as $msg)
+                @php $isMe = $msg->user_id === $user->id; @endphp
+                <div class="flex flex-col {{ $isMe ? 'items-end' : 'items-start' }}" data-msg-id="{{ $msg->id }}">
+                    <div class="text-[11px] text-slate-400 mb-1">
+                        <span class="font-bold text-slate-300">{{ $msg->user->username ?? 'Юзер' }}</span>
+                        • {{ $msg->created_at?->format('H:i') }}
+                    </div>
+                    <div class="max-w-lg px-4 py-2.5 rounded-2xl text-sm {{ $isMe ? 'bg-emerald-500 text-slate-950 font-medium' : 'bg-slate-800 text-slate-100 border border-slate-700' }}">
+                        {{ $msg->body }}
+                    </div>
+                </div>
+            @endforeach
+        @endif
+    </div>
+
+    <!-- Форма отправки -->
+    <form id="chat-form" class="p-3 border-t border-slate-800 bg-slate-900/80 flex gap-2">
+        @csrf
+        <input type="text" id="chat-input" name="body" required autocomplete="off" placeholder="Напишите сообщение в общий чат..." class="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+        <button type="submit" class="px-6 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs transition">
+            Отправить
+        </button>
+    </form>
+</div>
+
+<script>
+(function () {
+    const chatMessages = document.getElementById('chat-messages');
+    const chatForm = document.getElementById('chat-form');
+    const chatInput = document.getElementById('chat-input');
+    const currentUserId = {{ (int) $user->id }};
+    const pollUrl = "{{ route('chat.global.messages') }}";
+
+    let lastMessageId = {{ (int) ($messages->last()?->id ?? 0) }};
+
+    function forceScrollBottom() {
+        if (!chatMessages) return;
+        chatMessages.scrollTop = chatMessages.scrollHeight + 9999;
+    }
+
+    forceScrollBottom();
+    window.addEventListener('load', () => {
+        forceScrollBottom();
+        setTimeout(forceScrollBottom, 120);
+    });
+
+    function appendGlobalMessage(msg) {
+        const msgId = Number(msg.id || 0);
+        if (msgId > 0 && chatMessages.querySelector(`[data-msg-id="${msgId}"]`)) {
+            return;
+        }
+        if (msgId > lastMessageId) {
+            lastMessageId = msgId;
+        }
+
+        const noMsg = document.getElementById('no-messages');
+        if (noMsg) noMsg.remove();
+
+        const isMe = Number(msg.user_id) === currentUserId;
+        const wrapper = document.createElement('div');
+        wrapper.className = `flex flex-col ${isMe ? 'items-end' : 'items-start'}`;
+        if (msgId > 0) wrapper.setAttribute('data-msg-id', String(msgId));
+
+        const meta = document.createElement('div');
+        meta.className = 'text-[11px] text-slate-400 mb-1';
+        meta.innerHTML = `<span class="font-bold text-slate-300"></span> • ${msg.time}`;
+        meta.querySelector('span').textContent = msg.username;
+
+        const bubble = document.createElement('div');
+        bubble.className = `max-w-lg px-4 py-2.5 rounded-2xl text-sm ${isMe ? 'bg-emerald-500 text-slate-950 font-medium' : 'bg-slate-800 text-slate-100 border border-slate-700'}`;
+        bubble.textContent = msg.body;
+
+        wrapper.appendChild(meta);
+        wrapper.appendChild(bubble);
+
+        chatMessages.appendChild(wrapper);
+        forceScrollBottom();
+    }
+
+    chatForm.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        const body = chatInput.value.trim();
+        if (!body) return;
+
+        chatInput.value = '';
+        chatInput.focus();
+
+        try {
+            const response = await fetch("{{ route('chat.global.store') }}", {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRF-TOKEN': '{{ csrf_token() }}',
+                    'Accept': 'application/json'
+                },
+                body: JSON.stringify({ body })
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                if (data.message) appendGlobalMessage(data.message);
+            }
+        } catch (err) {
+            console.error('Ошибка отправки:', err);
+        }
+    });
+
+    if (window.Echo) {
+        window.Echo.channel('public-chat')
+            .listen('.message.sent', (data) => appendGlobalMessage(data));
+    }
+
+    setInterval(async () => {
+        try {
+            const res = await fetch(`${pollUrl}?after_id=${lastMessageId}`, {
+                headers: { 'Accept': 'application/json' }
+            });
+            if (res.ok) {
+                const data = await res.json();
+                if (Array.isArray(data.messages)) {
+                    data.messages.forEach(appendGlobalMessage);
+                }
+            }
+        } catch (e) {}
+    }, 2000);
+})();
+</script>
+@endsection
+==> resources/views/chat/index.blade.php <==
+@extends('layouts.app')
+
+@section('title', 'Сообщения по сделкам — SportPay')
+
+@section('content')
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <!-- Левая панель: Список диалогов -->
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden flex flex-col h-[74vh]">
+        <div class="p-4 border-b border-slate-800">
+            <h1 class="text-sm font-extrabold uppercase tracking-wider text-slate-300">Диалоги по сделкам</h1>
+        </div>
+
+        <div class="divide-y divide-slate-800/70 overflow-y-auto flex-1">
+            @if($orders->isEmpty())
+                <div class="p-8 text-center text-xs text-slate-500">
+                    У вас пока нет активных сделок и диалогов.
+                </div>
+            @else
+                @foreach($orders as $dialogOrder)
+                    @php
+                        $counterparty = $dialogOrder->counterpartyFor($user);
+                        $isActive = $activeOrder && $activeOrder->id === $dialogOrder->id;
+                    @endphp
+                    <a href="{{ route('chat.index', ['order_id' => $dialogOrder->id]) }}"
+                       class="block p-4 transition {{ $isActive ? 'bg-slate-800/90 border-l-4 border-emerald-400' : 'hover:bg-slate-800/40' }}">
+                        <div class="flex items-center justify-between mb-1">
+                            <div class="font-bold text-sm text-white flex items-center gap-2">
+                                <span>{{ $counterparty->username }}</span>
+                                @if($dialogOrder->unread_count > 0)
+                                    <span class="px-1.5 py-0.5 text-[10px] font-extrabold rounded-full bg-rose-500 text-white">
+                                        +{{ $dialogOrder->unread_count }}
+                                    </span>
+                                @endif
+                            </div>
+                            <span class="text-[11px] font-semibold px-2 py-0.5 rounded {{ $dialogOrder->status->badgeClasses() }}">
+                                {{ $dialogOrder->status->label() }}
+                            </span>
+                        </div>
+                        <div class="text-xs text-emerald-400 font-medium truncate">
+                            Заказ #{{ $dialogOrder->id }} • {{ $dialogOrder->lot->title ?? 'Лот' }}
+                        </div>
+                        @if($dialogOrder->latestMessage)
+                            <div class="text-xs text-slate-400 truncate mt-1">
+                                {{ $dialogOrder->latestMessage->body }}
+                            </div>
+                        @endif
+                    </a>
+                @endforeach
+            @endif
+        </div>
+    </div>
+
+    <!-- Правая панель: Активный диалог -->
+    <div class="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl flex flex-col justify-between h-[74vh] overflow-hidden">
+        @if(!$activeOrder)
+            <div class="p-12 text-center text-sm text-slate-500 my-auto">
+                Выберите сделку слева, чтобы открыть чат.
+            </div>
+        @else
+            @php $partner = $activeOrder->counterpartyFor($user); @endphp
+            <!-- Шапка диалога -->
+            <div class="p-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 bg-slate-900/60">
+                <div>
+                    <div class="flex items-center gap-2">
+                        <a href="{{ route('users.show', $partner->id) }}" class="font-extrabold text-white hover:text-emerald-400">
+                            {{ $partner->username }}
+                        </a>
+                        <span class="text-xs px-2 py-0.5 rounded font-bold {{ $activeOrder->status->badgeClasses() }}">
+                            {{ $activeOrder->status->label() }}
+                        </span>
+                        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" title="Живое обновление активно"></span>
+                    </div>
+                    <div class="text-xs text-slate-400 mt-0.5">
+                        Заказ #{{ $activeOrder->id }} • {{ $activeOrder->lot->title ?? 'Лот' }} ({{ number_format((float) $activeOrder->total_price, 0, '.', ' ') }} ₽)
+                    </div>
+                </div>
+
+                <a href="{{ route('orders.show', $activeOrder) }}" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200 transition">
+                    Карточка сделки →
+                </a>
+            </div>
+
+            <!-- Сообщения -->
+            <div id="dialog-messages-box" style="overflow-y: auto; scroll-behavior: auto;" class="p-5 space-y-3 flex-1 overflow-y-auto">
+                @foreach($activeOrder->messages as $msg)
+                    @if($msg->is_system)
+                        <div class="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-center text-xs text-amber-300" data-msg-id="{{ $msg->id }}">
+                            🛡️ {{ $msg->body }}
+                        </div>
+                    @else
+                        @php $isMe = $msg->user_id === $user->id; @endphp
+                        <div class="flex flex-col {{ $isMe ? 'items-end' : 'items-start' }}" data-msg-id="{{ $msg->id }}">
+                            <div class="text-[11px] text-slate-400 mb-1">
+                                {{ $msg->user->username ?? 'Юзер' }} • {{ $msg->created_at?->format('H:i') }}
+                            </div>
+                            <div class="max-w-md px-4 py-2.5 rounded-2xl text-sm {{ $isMe ? 'bg-emerald-500 text-slate-950 font-medium' : 'bg-slate-800 text-slate-100 border border-slate-700' }}">
+                                {{ $msg->body }}
+                            </div>
+                        </div>
+                    @endif
+                @endforeach
+            </div>
+
+            <!-- Форма отправки -->
+            <form id="dialog-chat-form" action="{{ route('orders.messages.store', $activeOrder) }}" method="POST" class="p-4 border-t border-slate-800 flex gap-2 bg-slate-900/60">
+                @csrf
+                <input type="text" id="dialog-chat-input" name="body" required autocomplete="off" placeholder="Написать сообщение..." class="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-emerald-500">
+                <button type="submit" class="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs transition">
+                    Отправить
+                </button>
+            </form>
+
+            <script>
+            (function () {
+                const box = document.getElementById('dialog-messages-box');
+                const form = document.getElementById('dialog-chat-form');
+                const input = document.getElementById('dialog-chat-input');
+                const currentUserId = {{ (int) $user->id }};
+                const orderId = {{ (int) $activeOrder->id }};
+                const pollUrl = "{{ route('orders.messages.index', $activeOrder) }}";
+
+                let lastMessageId = {{ (int) ($activeOrder->messages->last()?->id ?? 0) }};
+
+                function forceScrollBottom() {
+                    if (!box) return;
+                    box.scrollTop = box.scrollHeight + 9999;
+                }
+
+                // Прокручиваем вниз сразу, после загрузки DOM и после рендера стилей Tailwind CDN
+                forceScrollBottom();
+                window.addEventListener('load', () => {
+                    forceScrollBottom();
+                    setTimeout(forceScrollBottom, 120);
+                });
+
+                function appendDialogMessage(msg) {
+                    const msgId = Number(msg.id || 0);
+                    if (msgId > 0 && box.querySelector(`[data-msg-id="${msgId}"]`)) {
+                        return;
+                    }
+                    if (msgId > lastMessageId) {
+                        lastMessageId = msgId;
+                    }
+
+                    const wrapper = document.createElement('div');
+                    if (msgId > 0) wrapper.setAttribute('data-msg-id', String(msgId));
+
+                    if (msg.is_system) {
+                        wrapper.className = 'p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-center text-xs text-amber-300';
+                        wrapper.textContent = '🛡️ ' + msg.body;
+                    } else {
+                        const isMe = Number(msg.user_id) === currentUserId;
+                        wrapper.className = `flex flex-col ${isMe ? 'items-end' : 'items-start'}`;
+
+                        const meta = document.createElement('div');
+                        meta.className = 'text-[11px] text-slate-400 mb-1';
+                        meta.textContent = `${msg.username} • ${msg.time}`;
+
+                        const bubble = document.createElement('div');
+                        bubble.className = `max-w-md px-4 py-2.5 rounded-2xl text-sm ${isMe ? 'bg-emerald-500 text-slate-950 font-medium' : 'bg-slate-800 text-slate-100 border border-slate-700'}`;
+                        bubble.textContent = msg.body;
+
+                        wrapper.appendChild(meta);
+                        wrapper.appendChild(bubble);
+                    }
+
+                    box.appendChild(wrapper);
+                    forceScrollBottom();
+                }
+
+                // Отправка без перезагрузки страницы
+                form.addEventListener('submit', async function (e) {
+                    e.preventDefault();
+                    const body = input.value.trim();
+                    if (!body) return;
+
+                    input.value = '';
+                    input.focus();
+
+                    try {
+                        const res = await fetch(form.action, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-CSRF-TOKEN': '{{ csrf_token() }}',
+                                'Accept': 'application/json'
+                            },
+                            body: JSON.stringify({ body })
+                        });
+                        if (res.ok) {
+                            const data = await res.json();
+                            if (data.message) appendDialogMessage(data.message);
+                        }
+                    } catch (err) {
+                        console.error('Ошибка отправки:', err);
+                    }
+                });
+
+                // 1. WebSocket (если запущен Reverb)
+                if (window.Echo) {
+                    window.Echo.channel(`orders.${orderId}`)
+                        .listen('.order.message.sent', (data) => appendDialogMessage(data));
+                }
+
+                // 2. Надежный фоновый опрос каждые 2 секунды (работает даже без Reverb)
+                setInterval(async () => {
+                    try {
+                        const res = await fetch(`${pollUrl}?after_id=${lastMessageId}`, {
+                            headers: { 'Accept': 'application/json' }
+                        });
+                        if (res.ok) {
+                            const data = await res.json();
+                            if (Array.isArray(data.messages)) {
+                                data.messages.forEach(appendDialogMessage);
+                            }
+                        }
+                    } catch (e) {}
+                }, 2000);
+            })();
+            </script>
+        @endif
+    </div>
+</div>
+@endsection
+==> resources/views/users/show.blade.php <==
+@extends('layouts.app')
+
+@section('title', "Профиль {$profileUser->username} — SportPay")
+
+@section('content')
+<div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 flex flex-wrap items-center justify-between gap-6">
+    <div class="flex items-center gap-4">
+        <div class="w-16 h-16 rounded-2xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-2xl font-extrabold text-emerald-400">
+            {{ strtoupper(substr($profileUser->username, 0, 1)) }}
+        </div>
+        <div>
+            <div class="flex items-center gap-2">
+                <h1 class="text-2xl font-extrabold text-white">{{ $profileUser->username }}</h1>
+                <span class="text-xs px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
+                    {{ $profileUser->status->label() }}
+                </span>
+            </div>
+            <p class="text-xs text-slate-400 mt-1">
+                На SportPay с {{ $profileUser->created_at?->format('d.m.Y') ?? '2026' }}
+            </p>
+        </div>
+    </div>
+
+    <div class="flex items-center gap-6 bg-slate-950/70 px-6 py-3 rounded-xl border border-slate-800">
+        <div class="text-center">
+            <div class="text-xs text-slate-400">Рейтинг продавца</div>
+            <div class="text-xl font-extrabold text-amber-400">★ {{ number_format((float) $profileUser->rating, 2) }}</div>
+        </div>
+        <div class="h-8 w-px bg-slate-800"></div>
+        <div class="text-center">
+            <div class="text-xs text-slate-400">Отзывов</div>
+            <div class="text-xl font-extrabold text-white">{{ $completedSalesCount }}</div>
+        </div>
+        <div class="h-8 w-px bg-slate-800"></div>
+        <div class="text-center">
+            <div class="text-xs text-slate-400">Активных лотов</div>
+            <div class="text-xl font-extrabold text-emerald-400">{{ $profileUser->lots->count() }}</div>
+        </div>
+    </div>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <div class="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-5">
+        <h2 class="text-lg font-bold text-white mb-4">Активные лоты продавца {{ $profileUser->username }}</h2>
+        <div class="space-y-3">
+            @if($profileUser->lots->isEmpty())
+                <div class="text-sm text-slate-500 py-6 text-center">У пользователя нет активных лотов.</div>
+            @else
+                @foreach($profileUser->lots as $lot)
+                    <div class="p-4 rounded-xl bg-slate-800/50 border border-slate-700/60 flex items-center justify-between gap-4">
+                        <div>
+                            <span class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300">{{ $lot->product_type }}</span>
+                            <div class="font-bold text-white mt-1">{{ $lot->title }}</div>
+                            <div class="text-xs text-slate-400 mt-0.5">{{ $lot->description }}</div>
+                        </div>
+                        <div class="text-right shrink-0 space-y-2">
+                            <div class="text-lg font-extrabold text-emerald-400">{{ number_format((float) $lot->price, 0, '.', ' ') }} ₽</div>
+                            @if($user->id !== $profileUser->id)
+                                <form action="{{ route('lots.purchase', $lot) }}" method="POST">
+                                    @csrf
+                                    <button type="submit" class="px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs">
+                                        Купить
+                                    </button>
+                                </form>
+                            @else
+                                <a href="{{ route('lots.edit', $lot) }}" class="inline-block px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-slate-200">
+                                    ✎ Изм.
+                                </a>
+                            @endif
+                        </div>
+                    </div>
+                @endforeach
+            @endif
+        </div>
+    </div>
+
+    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-5">
+        <h2 class="text-lg font-bold text-white mb-4">Отзывы покупателей ({{ $completedSalesCount }})</h2>
+        <div class="space-y-3">
+            @if($profileUser->receivedReviews->isEmpty())
+                <div class="text-sm text-slate-500 py-6 text-center">Отзывов пока нет.</div>
+            @else
+                @foreach($profileUser->receivedReviews as $review)
+                    <div class="p-3.5 rounded-xl bg-slate-800/60 border border-slate-700/60 space-y-1.5">
+                        <div class="flex items-center justify-between text-xs">
+                            <a href="{{ route('users.show', $review->author_id) }}" class="font-bold text-emerald-400 hover:underline">
+                                {{ $review->author->username ?? 'Покупатель' }}
+                            </a>
+                            <span class="text-amber-400 font-bold">{{ str_repeat('★', $review->rating) }}</span>
+                        </div>
+                        <div class="text-xs text-slate-400">Лот: {{ $review->lot->title ?? 'Удаленный лот' }}</div>
+                        <p class="text-sm text-slate-200">{{ $review->comment }}</p>
+                    </div>
+                @endforeach
+            @endif
+        </div>
+    </div>
+</div>
+@endsection
+==> database/migrations/2026_11_02_050152_add_auto_delivery_text_to_lots_table.php <==
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('lots', function (Blueprint $table): void {
+            $table->text('auto_delivery_text')
+                ->nullable()
+                ->after('stock_quantity')
+                ->comment('Секретный текст/ссылка для автоматической выдачи после оплаты');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('lots', function (Blueprint $table): void {
+            $table->dropColumn('auto_delivery_text');
+        });
+    }
+};
+==> database/migrations/2026_10_20_000002_create_orders_table.php <==
+<?php
+
+use App\Enums\OrderStatus;
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    /**
+     * Run the migrations.
+     */
+    public function up(): void
+    {
+        Schema::create('orders', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('lot_id')->constrained('lots')->restrictOnDelete();
+            $table->foreignId('buyer_id')->constrained('users')->restrictOnDelete();
+            $table->foreignId('seller_id')->constrained('users')->restrictOnDelete();
+            $table->integer('quantity')->default(1);
+            $table->decimal('unit_price', 12, 2);
+            $table->decimal('total_price', 12, 2);
+            $table->string('status', 30)->default(OrderStatus::Created->value)->index();
+            $table->timestamps();
+        });
+    }
+
+    /**
+     * Reverse the migrations.
+     */
+    public function down(): void
+    {
+        Schema::dropIfExists('orders');
+    }
+};
+
+==> database/migrations/2026_10_20_000001_create_lots_table.php <==
+<?php
+
+use App\Enums\LotStatus;
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    /**
+     * Run the migrations.
+     */
+    public function up(): void
+    {
+        Schema::create('lots', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('seller_id')->constrained('users')->cascadeOnDelete();
+            $table->string('title', 255);
+            $table->string('product_type', 100)->index();
+            $table->text('description')->nullable();
+            $table->decimal('price', 12, 2);
+            $table->integer('stock_quantity')->default(1);
+            $table->string('status', 30)->default(LotStatus::Active->value)->index();
+            $table->timestamps();
+        });
+    }
+
+    /**
+     * Reverse the migrations.
+     */
+    public function down(): void
+    {
+        Schema::dropIfExists('lots');
+    }
+};
+
+==> database/migrations/2026_11_01_052953_add_read_at_to_messages_table.php <==
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::table('messages', function (Blueprint $table) {
+            $table->timestamp('read_at')->nullable()->after('is_system');
+            $table->index(['order_id', 'user_id', 'read_at']);
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::table('messages', function (Blueprint $table) {
+            $table->dropIndex(['order_id', 'user_id', 'read_at']);
+            $table->dropColumn('read_at');
+        });
+    }
+};
+==> database/migrations/0001_01_01_000002_create_jobs_table.php <==
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    /**
+     * Run the migrations.
+     */
+    public function up(): void
+    {
+        Schema::create('jobs', function (Blueprint $table) {
+            $table->id();
+            $table->string('queue')->index();
+            $table->longText('payload');
+            $table->unsignedSmallInteger('attempts');
+            $table->unsignedInteger('reserved_at')->nullable();
+            $table->unsignedInteger('available_at');
+            $table->unsignedInteger('created_at');
+        });
+
+        Schema::create('job_batches', function (Blueprint $table) {
+            $table->string('id')->primary();
+            $table->string('name');
+            $table->integer('total_jobs');
+            $table->integer('pending_jobs');
+            $table->integer('failed_jobs');
+            $table->longText('failed_job_ids');
+            $table->mediumText('options')->nullable();
+            $table->integer('cancelled_at')->nullable();
+            $table->integer('created_at');
+            $table->integer('finished_at')->nullable();
+        });
+
+        Schema::create('failed_jobs', function (Blueprint $table) {
+            $table->id();
+            $table->string('uuid')->unique();
+            $table->string('connection');
+            $table->string('queue');
+            $table->longText('payload');
+            $table->longText('exception');
+            $table->timestamp('failed_at')->useCurrent();
+
+            $table->index(['connection', 'queue', 'failed_at']);
+        });
+    }
+
+    /**
+     * Reverse the migrations.
+     */
+    public function down(): void
+    {
+        Schema::dropIfExists('jobs');
+        Schema::dropIfExists('job_batches');
+        Schema::dropIfExists('failed_jobs');
+    }
+};
+
+==> database/migrations/2026_10_31_165836_create_messages_table.php <==
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('messages', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('order_id')->constrained('orders')->cascadeOnDelete();
+            $table->foreignId('user_id')->constrained('users')->cascadeOnDelete(); // Кто написал (покупатель, продавец или админ)
+            $table->text('body');
+            $table->boolean('is_system')->default(false); // Системное сообщение (например: "Заказ создан", "Деньги заморожены")
+            $table->timestamps();
+
+            // Индекс для мгновенной выборки чата по конкретному заказу
+            $table->index(['order_id', 'created_at']);
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('messages');
+    }
+};
+==> database/migrations/2026_10_20_000004_create_reviews_table.php <==
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    /**
+     * Run the migrations.
+     */
+    public function up(): void
+    {
+        Schema::create('reviews', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('order_id')->unique()->constrained('orders')->cascadeOnDelete();
+            $table->foreignId('author_id')->constrained('users')->restrictOnDelete();
+            $table->foreignId('seller_id')->constrained('users')->restrictOnDelete();
+            $table->foreignId('lot_id')->constrained('lots')->cascadeOnDelete();
+            $table->unsignedTinyInteger('rating');
+            $table->text('comment')->nullable();
+            $table->timestamps();
+        });
+    }
+
+    /**
+     * Reverse the migrations.
+     */
+    public function down(): void
+    {
+        Schema::dropIfExists('reviews');
+    }
+};
+
+==> database/migrations/2026_11_01_180812_create_global_messages_table.php <==
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        Schema::create('global_messages', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('user_id')->constrained('users')->cascadeOnDelete();
+            $table->text('body');
+            $table->timestamps();
+
+            $table->index('created_at');
+        });
+    }
+
+    public function down(): void
+    {
+        Schema::dropIfExists('global_messages');
+    }
+};
+==> database/migrations/2026_10_20_000003_create_wallet_transactions_table.php <==
+<?php
+
+use App\Enums\TransactionStatus;
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    /**
+     * Run the migrations.
+     */
+    public function up(): void
+    {
+        Schema::create('wallet_transactions', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('user_id')->constrained('users')->restrictOnDelete();
+            $table->foreignId('order_id')->nullable()->constrained('orders')->nullOnDelete();
+            $table->decimal('amount', 12, 2);
+            $table->string('type', 50)->index();
+            $table->decimal('balance_after', 12, 2);
+            $table->string('status', 30)->default(TransactionStatus::Success->value);
+            $table->timestamps();
+        });
+    }
+
+    /**
+     * Reverse the migrations.
+     */
+    public function down(): void
+    {
+        Schema::dropIfExists('wallet_transactions');
+    }
+};
+
+==> database/migrations/0001_01_01_000000_create_users_table.php <==
+<?php
+
+use App\Enums\UserStatus;
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    /**
+     * Run the migrations.
+     */
+    public function up(): void
+    {
+        Schema::create('users', function (Blueprint $table) {
+            $table->id();
+            $table->string('username', 100)->unique();
+            $table->string('email', 255)->unique();
+            $table->string('password', 255);
+            $table->string('phone', 20)->nullable();
+            $table->decimal('wallet_balance', 12, 2)->default(0.00);
+            $table->decimal('rating', 3, 2)->default(0.00);
+            $table->string('status', 30)->default(UserStatus::Active->value)->index();
+            $table->rememberToken();
+            $table->timestamps();
+        });
+
+        Schema::create('password_reset_tokens', function (Blueprint $table) {
+            $table->string('email')->primary();
+            $table->string('token');
+            $table->timestamp('created_at')->nullable();
+        });
+
+        Schema::create('sessions', function (Blueprint $table) {
+            $table->string('id')->primary();
+            $table->foreignId('user_id')->nullable()->index();
+            $table->string('ip_address', 45)->nullable();
+            $table->text('user_agent')->nullable();
+            $table->longText('payload');
+            $table->integer('last_activity')->index();
+        });
+    }
+
+    /**
+     * Reverse the migrations.
+     */
+    public function down(): void
+    {
+        Schema::dropIfExists('users');
+        Schema::dropIfExists('password_reset_tokens');
+        Schema::dropIfExists('sessions');
+    }
+};
+
+==> database/migrations/0001_01_01_000001_create_cache_table.php <==
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    /**
+     * Run the migrations.
+     */
+    public function up(): void
+    {
+        Schema::create('cache', function (Blueprint $table) {
+            $table->string('key')->primary();
+            $table->mediumText('value');
+            $table->bigInteger('expiration')->index();
+        });
+
+        Schema::create('cache_locks', function (Blueprint $table) {
+            $table->string('key')->primary();
+            $table->string('owner');
+            $table->bigInteger('expiration')->index();
+        });
+    }
+
+    /**
+     * Reverse the migrations.
+     */
+    public function down(): void
+    {
+        Schema::dropIfExists('cache');
+        Schema::dropIfExists('cache_locks');
+    }
+};
