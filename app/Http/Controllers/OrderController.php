@@ -23,23 +23,18 @@ class OrderController extends Controller
 
     public function show(Order $order): View
     {
-        $user =$this->currentUser();
+        $user = $this->currentUser();
+        $this->authorizeAction('view', $order);
 
-        if (!$order->isParticipant($user)) {
-            abort(403, 'Доступ запрещен: вы не являетесь участником этой сделки.');
-        }
+        $order->load(['lot', 'buyer', 'seller', 'review', 'messages.user']);
 
-        // Отмечаем входящие сообщения в этом заказе как прочитанные
         Message::where('order_id', $order->id)
             ->where('user_id', '!=', $user->id)
             ->whereNull('read_at')
             ->update(['read_at' => now()]);
 
-        $order->load(['lot', 'buyer', 'seller', 'review', 'messages.user']);
-
         return view('orders.show', [
             'user' => $user,
-            'allUsers' => User::orderBy('id')->get(),
             'order' => $order,
         ]);
     }

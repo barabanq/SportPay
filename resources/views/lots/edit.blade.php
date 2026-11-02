@@ -49,6 +49,7 @@
         </div>
 
         <div class="flex items-center justify-between pt-4 border-t border-slate-800">
+        <textarea name="auto_delivery_text" rows="2" placeholder="⚡ Секретный текст/ссылка для автовыдачи (необязательно)..." class="w-full bg-slate-950 border border-emerald-500/40 rounded-lg px-3 py-2 text-xs text-emerald-300 placeholder-slate-500"></textarea>
             <button type="submit" class="px-6 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs">
                 Сохранить изменения
             </button>

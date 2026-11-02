@@ -5,6 +5,27 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>@yield('title', 'SportPay — Биржа спортивных товаров и услуг')</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://js.pusher.com/8.2.0/pusher.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/laravel-echo@1.16.1/dist/echo.iife.js"></script>
+    <script>
+    window.Pusher = Pusher;
+    window.Echo = new Echo({
+        broadcaster: 'reverb',
+        key: '{{ config("broadcasting.connections.reverb.key", "sportpay-key") }}',
+        wsHost: '{{ config("broadcasting.connections.reverb.options.host", "127.0.0.1") }}',
+        wsPort: {{ (int) config("broadcasting.connections.reverb.options.port", 8080) }},
+        wssPort: {{ (int) config("broadcasting.connections.reverb.options.port", 8080) }},
+        forceTLS: false,
+        enabledTransports: ['ws', 'wss'],
+    });
+
+    window.Echo.connector.pusher.connection.bind('connected', () => {
+        console.log('[WebSocket] Успешно подключено к Reverb!');
+    });
+    window.Echo.connector.pusher.connection.bind('error', (err) => {
+        console.error('[WebSocket] Ошибка подключения:', err);
+    });
+</script>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen font-sans">
 

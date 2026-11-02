@@ -58,7 +58,14 @@
                         <tr class="lot-row hover:bg-slate-800/40">
                             <td class="py-3 px-2"><span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-300">{{ $lot->product_type }}</span></td>
                             <td class="py-3 px-2">
-                                <div class="font-semibold text-white">{{ $lot->title }}</div>
+                            <div class="font-semibold text-white flex items-center gap-1.5">
+                            <span>{{ $lot->title }}</span>
+                            @if($lot->hasAutoDelivery())
+                                <span title="Мгновенная автовыдача после оплаты" class="px-1.5 py-0.5 text-[10px] font-extrabold rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                    ⚡ Автовыдача
+                                </span>
+                            @endif
+                        </div>
                                 <div class="text-xs text-slate-400">{{ $lot->description }} ({{ $lot->stock_quantity }} шт.)</div>
                             </td>
                             <td class="py-3 px-2">
@@ -134,6 +141,7 @@
                 </div>
                 <input type="hidden" name="stock_quantity" value="5">
                 <textarea name="description" rows="2" required placeholder="Описание..." class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white"></textarea>
+                <textarea name="auto_delivery_text" rows="2" placeholder="⚡ Секретный текст/ссылка для автовыдачи (необязательно)..." class="w-full bg-slate-950 border border-emerald-500/40 rounded-lg px-3 py-2 text-xs text-emerald-300 placeholder-slate-500"></textarea>
                 <button type="submit" class="w-full py-2.5 rounded-xl bg-indigo-500 text-white font-bold text-xs">Опубликовать</button>
             </form>
         </div>

@@ -19,9 +19,7 @@ class ChatController extends Controller
         if ($request->filled('order_id')) {$activeOrder = Order::with(['lot', 'buyer', 'seller', 'review', 'messages.user'])
                 ->findOrFail($request->integer('order_id'));
 
-            if (!$activeOrder->isParticipant($user)) {
-                abort(403, 'У вас нет доступа к этому диалогу.');
-            }
+                $this->authorizeAction('view', $activeOrder);
 
             Message::where('order_id', $activeOrder->id)
                 ->where('user_id', '!=', $user->id)
@@ -49,26 +47,41 @@ class ChatController extends Controller
             ]);
     }
 
-    public function store(Request $request, Order$order): RedirectResponse
+    public function store(Request $request, Order $order): \Illuminate\Http\JsonResponse|RedirectResponse
     {
-        $user =$this->currentUser();
+        $user = $this->currentUser();
+        $this->authorizeAction('sendMessage', $order);
 
-        if (!$order->isParticipant($user)) {
-            abort(403, 'У вас нет доступа к чату этой сделки.');
-        }
-
-        $data =$request->validate([
+        $data = $request->validate([
             'body' => ['required', 'string', 'max:2000'],
         ]);
 
-        Message::create([
+        $message = Message::create([
             'order_id' => $order->id,
             'user_id' => $user->id,
             'body' => $data['body'],
             'is_system' => false,
         ]);
 
+        $message->load('user');
         $order->touch();
+
+        broadcast(new \App\Events\OrderMessageSent($message))->toOthers();
+
+        if ($request->wantsJson()) {
+            return response()->json([
+                'status' => 'success',
+                'message' => [
+                    'id' => $message->id,
+                    'order_id' => $order->id,
+                    'user_id' => $user->id,
+                    'username' => $user->username,
+                    'body' => $message->body,
+                    'is_system' => false,
+                    'time' => $message->created_at?->format('H:i'),
+                ],
+            ]);
+        }
 
         return back()->with('success', 'Сообщение отправлено.');
     }

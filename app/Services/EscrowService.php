@@ -40,6 +40,10 @@ class EscrowService
 
             $lot->decrement('stock_quantity', $quantity);
 
+            $initialStatus = $lot->hasAutoDelivery()
+                ? OrderStatus::Shipped
+                : OrderStatus::Paid;
+
             $order = Order::create([
                 'lot_id' => $lot->id,
                 'buyer_id' => $buyer->id,
@@ -47,7 +51,7 @@ class EscrowService
                 'quantity' => $quantity,
                 'unit_price' => $lot->price,
                 'total_price' => $totalPrice,
-                'status' => OrderStatus::Paid,
+                'status' => $initialStatus,
             ]);
 
             $this->walletService->applyBalanceChange(
@@ -62,6 +66,14 @@ class EscrowService
                 $buyer->id,
                 "Покупатель {$buyer->username} оплатил заказ. Средства ({$totalPrice} ₽) заморожены гарантом SportPay."
             );
+
+            if ($lot->hasAutoDelivery()) {
+                $this->logSystemMessage(
+                    $order,
+                    $lot->seller_id,
+                    "⚡ АВТОВЫДАЧА ТОВАРА: {$lot->auto_delivery_text}"
+                );
+            }
 
             return $order;
         });

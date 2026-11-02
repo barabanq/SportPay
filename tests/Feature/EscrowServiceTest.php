@@ -156,6 +156,39 @@ class EscrowServiceTest extends TestCase
         $this->assertSame(4000.00, (float) $buyer->fresh()->wallet_balance);
     }
 
+    public function test_purchase_lot_with_auto_delivery_immediately_marks_order_shipped_and_sends_secret_payload(): void
+    {
+        // Arrange
+        $seller = $this->createUser('Coach_Auto', balance: 0.00);
+        $buyer = $this->createUser('Runner_Fast', balance: 3000.00);
+
+        $lot = Lot::create([
+            'seller_id' => $seller->id,
+            'title' => 'PDF-гайд по спортивному питанию',
+            'product_type' => 'training_plan',
+            'description' => 'Мгновенная выдача ссылки после оплаты',
+            'auto_delivery_text' => 'https://sportpay.local/secret-pdf-link-777',
+            'price' => 1200.00,
+            'stock_quantity' => 5,
+            'status' => LotStatus::Active,
+        ]);
+
+        // Act
+        $order = $this->escrowService->purchaseLot($buyer->id, $lot->id);
+
+        // Assert
+        $this->assertSame(OrderStatus::Shipped, $order->status);
+        $this->assertSame(1800.00, (float) $buyer->fresh()->wallet_balance);
+        $this->assertSame(0.00, (float) $seller->fresh()->wallet_balance); // Деньги всё ещё в холде до подтверждения
+
+        $this->assertDatabaseHas('messages', [
+            'order_id' => $order->id,
+            'user_id' => $seller->id,
+            'body' => '⚡ АВТОВЫДАЧА ТОВАРА: https://sportpay.local/secret-pdf-link-777',
+            'is_system' => true,
+        ]);
+    }
+
     private function createUser(string $username, float $balance): User
     {
         return User::create([

@@ -8,7 +8,10 @@
         <h1 class="text-base font-extrabold text-white flex items-center gap-2">
             🌍 Общий спортивный чат SportPay
         </h1>
-        <span class="text-xs text-slate-400">Живое общение участников биржи</span>
+        <div class="flex items-center gap-2">
+            <span id="ws-indicator" class="w-2.5 h-2.5 rounded-full bg-rose-500" title="WebSocket отключен"></span>
+            <span id="ws-text" class="text-xs text-slate-400">Подключение к сокету...</span>
+        </div>
     </div>
 
     <!-- Лента сообщений -->
@@ -22,9 +25,7 @@
                 @php $isMe = $msg->user_id === $user->id; @endphp
                 <div class="flex flex-col {{ $isMe ? 'items-end' : 'items-start' }}">
                     <div class="text-[11px] text-slate-400 mb-1">
-                        <a href="{{ route('users.show', $msg->user_id) }}" class="font-bold hover:underline text-slate-300">
-                            {{ $msg->user->username ?? 'Юзер' }}
-                        </a>
+                        <span class="font-bold text-slate-300">{{ $msg->user->username ?? 'Юзер' }}</span>
                         • {{ $msg->created_at->format('H:i') }}
                     </div>
                     <div class="max-w-lg px-4 py-2.5 rounded-2xl text-sm {{ $isMe ? 'bg-emerald-500 text-slate-950 font-medium' : 'bg-slate-800 text-slate-100 border border-slate-700' }}">
@@ -50,11 +51,33 @@ document.addEventListener('DOMContentLoaded', function () {
     const chatMessages = document.getElementById('chat-messages');
     const chatForm = document.getElementById('chat-form');
     const chatInput = document.getElementById('chat-input');
+    const wsIndicator = document.getElementById('ws-indicator');
+    const wsText = document.getElementById('ws-text');
+    const currentUserId = {{ (int) $user->id }};
 
-    // Прокрутка чата вниз при загрузке
-    chatMessages.scrollTop = chatMessages.scrollHeight;
+    // Жесткая прокрутка вниз через анимационный фрейм браузера
+    function scrollToBottom() {
+        requestAnimationFrame(() => {
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        });
+    }
 
-    function appendMessage(username, body, time, isMe, userId) {
+    // Скроллим при старте
+    scrollToBottom();
+
+    // Индикатор статуса WebSocket
+    if (window.Echo) {
+        window.Echo.connector.pusher.connection.bind('connected', () => {
+            wsIndicator.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse';
+            wsText.textContent = 'Reverb активен';
+        });
+        window.Echo.connector.pusher.connection.bind('disconnected', () => {
+            wsIndicator.className = 'w-2.5 h-2.5 rounded-full bg-amber-500';
+            wsText.textContent = 'Соединение потеряно';
+        });
+    }
+
+    function appendMessage(username, body, time, isMe) {
         const noMsg = document.getElementById('no-messages');
         if (noMsg) noMsg.remove();
 
@@ -65,15 +88,16 @@ document.addEventListener('DOMContentLoaded', function () {
             <div class="text-[11px] text-slate-400 mb-1">
                 <span class="font-bold text-slate-300">${username}</span> • ${time}
             </div>
-            <div class="max-w-lg px-4 py-2.5 rounded-2xl text-sm ${isMe ? 'bg-emerald-500 text-slate-950 font-medium' : 'bg-slate-800 text-slate-100 border border-slate-700'}">
+            <div class="max-w-lg px-4 py-2.5 rounded-2xl text-sm ${isMe ? 'bg-emerald-500 text-slate-950 font-medium' : 'bg-slate-800 text-slate-100 border border-slate-700'}`}>
                 ${body}
             </div>
         `;
 
         chatMessages.appendChild(wrapper);
-        chatMessages.scrollTop = chatMessages.scrollHeight;
+        scrollToBottom(); // Всегда вниз при новом сообщении
     }
 
+    // Отправка через AJAX
     chatForm.addEventListener('submit', async function (e) {
         e.preventDefault();
         const body = chatInput.value.trim();
@@ -94,12 +118,22 @@ document.addEventListener('DOMContentLoaded', function () {
 
             const data = await response.json();
             if (data.status === 'success') {
-                appendMessage(data.message.user.username, data.message.body, data.message.created_at, true, data.message.user.id);
+                appendMessage(data.message.user.username, data.message.body, data.message.time, true);
             }
         } catch (err) {
-            console.error('Ошибка отправки сообщения:', err);
+            console.error('Ошибка отправки:', err);
         }
     });
+
+    // Получение сокетов
+    if (window.Echo) {
+        window.Echo.channel('public-chat')
+            .listen('.message.sent', (data) => {
+                if (Number(data.user_id) !== currentUserId) {
+                    appendMessage(data.username, data.body, data.time, false);
+                }
+            });
+    }
 });
 </script>
 @endsection

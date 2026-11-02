@@ -5,70 +5,67 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Enums\LotStatus;
-use App\Http\Requests\StoreLotRequest;
-use App\Http\Requests\UpdateLotRequest;
 use App\Models\Lot;
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
 
 class LotController extends Controller
 {
-    public function store(StoreLotRequest $request): RedirectResponse
+    public function store(Request $request): RedirectResponse
     {
+        $data = $request->validate([
+            'title' => ['required', 'string', 'max:255'],
+            'product_type' => ['required', 'string', 'in:training_plan,coaching,race_slot,equipment'],
+            'description' => ['required', 'string', 'max:2000'],
+            'auto_delivery_text' => ['nullable', 'string', 'max:2000'],
+            'price' => ['required', 'numeric', 'min:50', 'max:1000000'],
+            'stock_quantity' => ['required', 'integer', 'min:1', 'max:1000'],
+        ]);
+
         Lot::create([
-            ...$request->validated(),
+            ...$data,
             'seller_id' => $this->currentUser()->id,
             'status' => LotStatus::Active,
         ]);
 
-        return redirect()->route('home')->with('success', 'Лот успешно выставлен на витрину SportPay!');
+        return redirect()->route('home')->with('success', 'Лот успешно опубликован на витрине!');
     }
 
     public function edit(Lot $lot): View
     {
-        $this->ensureOwnership($lot);
+        $this->authorizeAction('update', $lot);
 
-        return view('lots.edit', compact('lot'));
+        return view('lots.edit', [
+            'user' => $this->currentUser(),
+            'lot' => $lot,
+        ]);
     }
 
-    public function update(UpdateLotRequest $request, Lot $lot): RedirectResponse
+    public function update(Request $request, Lot $lot): RedirectResponse
     {
-        $this->ensureOwnership($lot);
+        $this->authorizeAction('update', $lot);
 
-        $data = $request->validated();
-        $status = (int) $data['stock_quantity'] > 0 ? LotStatus::Active : LotStatus::Archived;
-
-        $lot->update([
-            ...$data,
-            'status' => $status,
+        $data = $request->validate([
+            'title' => ['required', 'string', 'max:255'],
+            'product_type' => ['required', 'string', 'in:training_plan,coaching,race_slot,equipment'],
+            'description' => ['required', 'string', 'max:2000'],
+            'auto_delivery_text' => ['nullable', 'string', 'max:2000'],
+            'price' => ['required', 'numeric', 'min:50', 'max:1000000'],
+            'stock_quantity' => ['required', 'integer', 'min:0', 'max:1000'],
         ]);
 
-        return redirect()->route('home')->with('success', "Лот «{$lot->title}» успешно обновлен!");
+        $lot->update($data);
+
+        return redirect()->route('home')->with('success', 'Лот успешно обновлен!');
     }
 
     public function destroy(Lot $lot): RedirectResponse
     {
-        $this->ensureOwnership($lot);
-
-        // Если по лоту уже были сделки — архивируем для сохранения истории заказов, иначе удаляем из БД
-        if ($lot->orders()->exists()) {
-            $lot->update([
-                'stock_quantity' => 0,
-                'status' => LotStatus::Archived,
-            ]);
-
-            return redirect()->route('home')->with('success', 'Лот снят с витрины и перенесен в архив (так как по нему есть история сделок).');
-        }
+        $this->authorizeAction('delete', $lot);
 
         $lot->delete();
 
-        return redirect()->route('home')->with('success', 'Лот полностью удален.');
-    }
-
-    private function ensureOwnership(Lot $lot): void
-    {
-        if ($lot->seller_id !== $this->currentUser()->id) {
-            abort(403, 'Вы можете редактировать или удалять только собственные лоты.');
-        }
+        return redirect()->route('home')->with('success', 'Лот удален.');
     }
 }

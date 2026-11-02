@@ -20,10 +20,20 @@ class Lot extends Model
         'title',
         'product_type',
         'description',
+        'auto_delivery_text',
         'price',
         'stock_quantity',
         'status',
     ];
+
+    protected $hidden = [
+        'auto_delivery_text',
+    ];
+
+    public function hasAutoDelivery(): bool
+    {
+        return filled($this->auto_delivery_text);
+    }
 
     protected function casts(): array
     {
