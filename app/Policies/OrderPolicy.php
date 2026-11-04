@@ -4,76 +4,43 @@ declare(strict_types=1);
 
 namespace App\Policies;
 
-use App\Enums\OrderStatus;
 use App\Models\Order;
 use App\Models\User;
-use Illuminate\Auth\Access\Response;
 
 class OrderPolicy
 {
-    /**
-     * Просматривать сделку и читать чат могут покупатель, продавец и арбитр.
-     */
-    public function view(User $user, Order $order): Response
+    public function view(User $user, Order $order): bool
     {
-        return $order->isParticipant($user)
-            ? Response::allow()
-            : Response::deny('У вас нет доступа к этой сделке.');
+        return $user->id === $order->buyer_id
+            || $user->id === $order->seller_id
+            || $user->isArbiter();
     }
 
-    /**
-     * Писать в чат сделки могут только участники (покупатель, продавец и арбитр).
-     */
-    public function sendMessage(User $user, Order $order): Response
+    public function message(User $user, Order $order): bool
     {
-        return $order->isParticipant($user)
-            ? Response::allow()
-            : Response::deny('У вас нет доступа к чату этой сделки.');
+        return $this->view($user, $order);
     }
 
-    /**
-     * Подтвердить выполнение заказа может только покупатель.
-     */
-    public function confirm(User $user, Order $order): Response
+    public function confirm(User $user, Order $order): bool
     {
-        return $order->buyer_id === $user->id
-            ? Response::allow()
-            : Response::deny('Только покупатель может подтвердить выполнение заказа.');
+        return ($user->id === $order->buyer_id || $user->isArbiter())
+            && $order->status->isConfirmable();
     }
 
-    /**
-     * Добровольно отменить заказ без спора может только продавец (или арбитр при споре).
-     */
-    public function cancel(User $user, Order $order): Response
+    public function cancel(User $user, Order $order): bool
     {
-        if ($order->seller_id === $user->id || $user->isArbiter()) {
-            return Response::allow();
-        }
-
-        if ($order->buyer_id === $user->id && $order->status === OrderStatus::Disputed) {
-            return Response::allow();
-        }
-
-        return Response::deny('Покупатель не может отменить оплаченный заказ напрямую. Откройте спор.');
+        return ($user->id === $order->seller_id || $user->isArbiter())
+            && $order->status->isConfirmable();
     }
 
-    /**
-     * Открыть спор может покупатель или продавец.
-     */
-    public function dispute(User $user, Order $order): Response
+    public function dispute(User $user, Order $order): bool
     {
-        return ($order->buyer_id === $user->id || $order->seller_id === $user->id)
-            ? Response::allow()
-            : Response::deny('Только участник сделки может открыть спор.');
+        return ($user->id === $order->buyer_id || $user->id === $order->seller_id)
+            && $order->status->isDisputable();
     }
 
-    /**
-     * Вынести решение по спору может только официальный арбитр.
-     */
-    public function resolve(User $user, Order $order): Response
+    public function resolve(User $user, Order $order): bool
     {
-        return $user->isArbiter()
-            ? Response::allow()
-            : Response::deny('Только официальный арбитр SportPay может выносить решение по спору.');
+        return $user->isArbiter() && $order->status->isConfirmable();
     }
 }

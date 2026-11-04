@@ -4,34 +4,33 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
-use App\Http\Requests\ConfirmOrderRequest;
-use App\Http\Requests\OpenDisputeRequest;
-use App\Http\Requests\PurchaseLotRequest;
 use App\Models\Lot;
-use App\Models\Message;
 use App\Models\Order;
 use App\Services\EscrowService;
 use DomainException;
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
 
 class OrderController extends Controller
 {
     public function __construct(
         private readonly EscrowService $escrowService
-    ) {}
+    ) {
+    }
 
     public function show(Order $order): View
     {
-        $user = $this->currentUser();
         $this->authorizeAction('view', $order);
 
-        $order->load(['lot', 'buyer', 'seller', 'review', 'messages.user']);
+        $user = $this->currentUser();
 
-        Message::where('order_id', $order->id)
+        $order->messages()
             ->where('user_id', '!=', $user->id)
             ->whereNull('read_at')
             ->update(['read_at' => now()]);
+
+        $order->load(['lot', 'buyer', 'seller', 'messages.user', 'review']);
 
         return view('orders.show', [
             'user' => $user,
@@ -39,38 +38,49 @@ class OrderController extends Controller
         ]);
     }
 
-    public function purchase(PurchaseLotRequest $request, Lot $lot): RedirectResponse
+    public function purchase(Request $request, Lot $lot): RedirectResponse
     {
-        $buyer = $this->currentUser();
-        $this->authorizeAction('purchase', $lot);
+        $data = $request->validate([
+            'quantity' => ['nullable', 'integer', 'min:1', 'max:1000'],
+        ]);
+
+        $quantity = (int) ($data['quantity'] ?? 1);
 
         try {
             $order = $this->escrowService->purchaseLot(
-                buyerId: $buyer->id,
+                buyerId: $this->currentUser()->id,
                 lotId: $lot->id,
-                quantity: $request->quantity()
+                quantity: $quantity
             );
 
             return redirect()
                 ->route('orders.show', $order)
-                ->with('success', "Заказ #{$order->id} ({$order->quantity} шт.) оплачен! Обсудите детали передачи с продавцом в чате.");
+                ->with('success', "Сделка #{$order->id} успешно создана! Средства зарезервированы в эскроу.");
         } catch (DomainException $e) {
-            return back()->with('error', $e->getMessage());
+            return redirect()
+                ->route('lots.show', $lot)
+                ->with('error', $e->getMessage());
         }
     }
 
-    public function confirm(ConfirmOrderRequest $request, Order $order): RedirectResponse
+    public function confirm(Request $request, Order $order): RedirectResponse
     {
+        $this->authorizeAction('confirm', $order);
+
+        $data = $request->validate([
+            'rating' => ['nullable', 'integer', 'min:1', 'max:5'],
+            'comment' => ['nullable', 'string', 'max:1000'],
+        ]);
+
         try {
             $this->escrowService->confirmOrder(
-                $order->id,
-                $this->currentUser()->id,
-                $request->integer('rating', 5),
-                $request->input('comment')
+                orderId: $order->id,
+                actorId: $this->currentUser()->id,
+                rating: (int) ($data['rating'] ?? 5),
+                comment: $data['comment'] ?? null
             );
-            return redirect()
-                ->route('orders.show', $order)
-                ->with('success', "Заказ #{$order->id} подтвержден! Деньги переведены продавцу.");
+
+            return back()->with('success', 'Выполнение заказа подтверждено! Средства переведены продавцу.');
         } catch (DomainException $e) {
             return back()->with('error', $e->getMessage());
         }
@@ -78,33 +88,36 @@ class OrderController extends Controller
 
     public function cancel(Order $order): RedirectResponse
     {
+        $this->authorizeAction('cancel', $order);
+
         try {
-            $this->escrowService->cancelAndRefundOrder($order->id, $this->currentUser()->id);
-            return redirect()
-                ->route('orders.show', $order)
-                ->with('success', "Заказ #{$order->id} отменен. Средства возвращены покупателю.");
+            $this->escrowService->cancelOrder(
+                orderId: $order->id,
+                actorId: $this->currentUser()->id
+            );
+
+            return back()->with('success', 'Заказ отменен. 100% средств возвращено покупателю, товар восстановлен на складе.');
         } catch (DomainException $e) {
             return back()->with('error', $e->getMessage());
         }
     }
 
-    public function store(PurchaseLotRequest $request, Lot $lot): RedirectResponse
+    public function dispute(Request $request, Order $order): RedirectResponse
     {
-        return $this->purchase($request, $lot);
-    }
+        $this->authorizeAction('dispute', $order);
 
-    public function dispute(OpenDisputeRequest $request, Order $order): RedirectResponse
-    {
+        $data = $request->validate([
+            'reason' => ['required', 'string', 'min:5', 'max:1000'],
+        ]);
+
         try {
             $this->escrowService->openDispute(
-                $order->id,
-                $this->currentUser()->id,
-                (string) $request->validated('reason')
+                orderId: $order->id,
+                actorId: $this->currentUser()->id,
+                reason: $data['reason']
             );
 
-            return redirect()
-                ->route('orders.show', $order)
-                ->with('error', "По заказу #{$order->id} открыт спор! Арбитр SportPay уведомлен.");
+            return back()->with('success', 'Открыт арбитражный спор. Официальный арбитр подключен к сделке.');
         } catch (DomainException $e) {
             return back()->with('error', $e->getMessage());
         }

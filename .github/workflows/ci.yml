@@ -1,0 +1,81 @@
+name: SportPay CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  lint-and-test:
+    name: Linters (Pint & PHPStan) + Feature Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP 8.3 with extensions
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mbstring, xml, ctype, iconv, intl, pdo_sqlite, pdo_pgsql, gd, bcmath, redis, pcntl
+          coverage: none
+
+      - name: Cache Composer packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache/files
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist --optimize-autoloader
+
+      - name: Prepare Laravel environment
+        run: |
+          cp .env.example .env || true
+          php artisan key:generate
+          touch database/database.sqlite
+
+      - name: Check code style (Laravel Pint)
+        run: ./vendor/bin/pint --test
+
+      - name: Run static analysis (PHPStan / Larastan)
+        run: |
+          if [ -f ./vendor/bin/phpstan ]; then
+            ./vendor/bin/phpstan analyse --memory-limit=512M
+          fi
+
+      - name: Run Automated Test Suite (Escrow, Wallet, Auth, Media, Localization)
+        env:
+          DB_CONNECTION: sqlite
+          DB_DATABASE: ":memory:"
+          SESSION_DRIVER: array
+          CACHE_STORE: array
+          QUEUE_CONNECTION: sync
+        run: php artisan test --without-tty
+
+  deploy:
+    name: Deploy to Production Server
+    needs: lint-and-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Trigger Production Deploy via SSH (runs only if secrets are configured)
+        if: ${{ secrets.DEPLOY_HOST != '' }}
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script: |
+            cd ${{ secrets.DEPLOY_PATH || '/var/www/sportpay' }}
+            git pull origin main
+            docker compose build app
+            docker compose up -d
+            docker compose exec -T app composer install --no-dev --optimize-autoloader
+            docker compose exec -T app php artisan migrate --force
+            docker compose exec -T app php artisan optimize
+            docker compose restart queue reverb

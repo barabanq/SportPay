@@ -10,7 +10,25 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Support\Carbon;
 
+/**
+ * @property int $id
+ * @property int $lot_id
+ * @property int $buyer_id
+ * @property int $seller_id
+ * @property int $quantity
+ * @property string|float $unit_price
+ * @property string|float $total_price
+ * @property OrderStatus $status
+ * @property int|null $unread_count
+ * @property Carbon|null $created_at
+ * @property Carbon|null $updated_at
+ * @property-read Lot|null $lot
+ * @property-read User|null $buyer
+ * @property-read User|null $seller
+ * @property-read Message|null $latestMessage
+ */
 class Order extends Model
 {
     use HasFactory;
@@ -50,14 +68,9 @@ class Order extends Model
         return $this->belongsTo(User::class, 'seller_id');
     }
 
-    public function review(): HasOne
-    {
-        return $this->hasOne(Review::class, 'order_id');
-    }
-
     public function messages(): HasMany
     {
-        return $this->hasMany(Message::class, 'order_id')->oldest();
+        return $this->hasMany(Message::class, 'order_id');
     }
 
     public function latestMessage(): HasOne
@@ -65,11 +78,9 @@ class Order extends Model
         return $this->hasOne(Message::class, 'order_id')->latestOfMany();
     }
 
-    public function isParticipant(User $user): bool
+    public function review(): HasOne
     {
-        return $this->buyer_id === $user->id
-            || $this->seller_id === $user->id
-            || $user->isArbiter();
+        return $this->hasOne(Review::class, 'order_id');
     }
 
     public function counterpartyFor(User $user): User

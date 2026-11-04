@@ -13,11 +13,14 @@ use Illuminate\Queue\SerializesModels;
 
 class OrderMessageSent implements ShouldBroadcastNow
 {
-    use Dispatchable, InteractsWithSockets, SerializesModels;
+    use Dispatchable;
+    use InteractsWithSockets;
+    use SerializesModels;
 
     public function __construct(
         public readonly Message $message
-    ) {}
+    ) {
+    }
 
     public function broadcastOn(): array
     {

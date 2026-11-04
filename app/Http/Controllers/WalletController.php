@@ -18,7 +18,8 @@ class WalletController extends Controller
 {
     public function __construct(
         private readonly WalletService $walletService
-    ) {}
+    ) {
+    }
 
     public function index(): View
     {

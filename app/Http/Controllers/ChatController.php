@@ -17,16 +17,16 @@ class ChatController extends Controller
 {
     public function index(Request $request): View
     {
-        $user =$this->currentUser();
+        $user = $this->currentUser();
 
         $orders = Order::with(['lot', 'buyer', 'seller', 'latestMessage'])
             ->where(function ($query) use ($user): void {
-                $query->where('buyer_id',$user->id)
+                $query->where('buyer_id', $user->id)
                     ->orWhere('seller_id', $user->id);
             })
             ->withCount([
                 'messages as unread_count' => function ($query) use ($user): void {
-                    $query->where('user_id', '!=',$user->id)->whereNull('read_at');
+                    $query->where('user_id', '!=', $user->id)->whereNull('read_at');
                 },
             ])
             ->latest('updated_at')
@@ -34,12 +34,14 @@ class ChatController extends Controller
 
         $activeOrder = null;
 
-        if ($request->filled('order_id')) {$activeOrder = Order::with(['lot', 'buyer', 'seller', 'messages.user'])
-                ->findOrFail((int) $request->integer('order_id'));
+        if ($request->filled('order_id')) {
+            $activeOrder = Order::with(['lot', 'buyer', 'seller', 'messages.user'])
+                    ->findOrFail((int) $request->integer('order_id'));
 
-            $this->authorizeAction('view',$activeOrder);
-        } elseif ($orders->isNotEmpty()) {$activeOrder = Order::with(['lot', 'buyer', 'seller', 'messages.user'])
-                ->find($orders->first()->id);
+            $this->authorizeAction('view', $activeOrder);
+        } elseif ($orders->isNotEmpty()) {
+            $activeOrder = Order::with(['lot', 'buyer', 'seller', 'messages.user'])
+                    ->find($orders->first()->id);
         }
 
         if ($activeOrder !== null) {
@@ -59,8 +61,8 @@ class ChatController extends Controller
 
     public function messages(Request $request, Order$order): JsonResponse
     {
-        $user =$this->currentUser();
-        $this->authorizeAction('view',$order);
+        $user = $this->currentUser();
+        $this->authorizeAction('view', $order);
 
         $afterId = (int)$request->query('after_id', 0);
 
@@ -92,10 +94,10 @@ class ChatController extends Controller
 
     public function store(Request $request, Order$order): JsonResponse|RedirectResponse
     {
-        $user =$this->currentUser();
-        $this->authorizeAction('sendMessage',$order);
+        $user = $this->currentUser();
+        $this->authorizeAction('sendMessage', $order);
 
-        $data =$request->validate([
+        $data = $request->validate([
             'body' => ['required', 'string', 'max:2000'],
         ]);
 
@@ -106,7 +108,8 @@ class ChatController extends Controller
             'is_system' => false,
         ]);
 
-        $message->load('user');$order->touch();
+        $message->load('user');
+        $order->touch();
 
         try {
             broadcast(new OrderMessageSent($message))->toOthers();

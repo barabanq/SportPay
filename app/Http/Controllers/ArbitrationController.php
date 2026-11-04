@@ -16,25 +16,26 @@ class ArbitrationController extends Controller
 {
     public function __construct(
         private readonly EscrowService $escrowService
-    ) {}
+    ) {
+    }
 
     public function index(): View
     {
-        $user = $this->currentUser();
-
         $disputedOrders = Order::with(['lot', 'buyer', 'seller', 'latestMessage'])
             ->where('status', OrderStatus::Disputed)
-            ->latest('updated_at')
+            ->latest()
             ->get();
 
         return view('arbitration.index', [
-            'user' => $user,
+            'user' => $this->currentUser(),
             'disputedOrders' => $disputedOrders,
         ]);
     }
 
     public function resolve(Request $request, Order $order): RedirectResponse
     {
+        $this->authorizeAction('resolve', $order);
+
         $data = $request->validate([
             'decision' => ['required', 'string', 'in:refund_buyer,release_seller'],
             'comment' => ['nullable', 'string', 'max:1000'],
@@ -48,9 +49,7 @@ class ArbitrationController extends Controller
                 comment: $data['comment'] ?? null
             );
 
-            return redirect()
-                ->route('orders.show', $order)
-                ->with('success', "Спор по заказу #{$order->id} успешно разрешен арбитром!");
+            return back()->with('success', "Спор по сделке #{$order->id} успешно разрешен арбитром.");
         } catch (DomainException $e) {
             return back()->with('error', $e->getMessage());
         }

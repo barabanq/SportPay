@@ -6,37 +6,28 @@ namespace App\Policies;
 
 use App\Models\Lot;
 use App\Models\User;
-use Illuminate\Auth\Access\Response;
 
 class LotPolicy
 {
-    /**
-     * Редактировать и обновлять лот может только его владелец (продавец).
-     */
-    public function update(User $user, Lot $lot): Response
+    public function create(User $user): bool
     {
-        return $lot->seller_id === $user->id
-            ? Response::allow()
-            : Response::deny('Вы можете редактировать только свои лоты.');
+        return $user->status->canTrade();
     }
 
-    /**
-     * Удалять лот может только его владелец или арбитр платформы.
-     */
-    public function delete(User $user, Lot $lot): Response
+    public function update(User $user, Lot $lot): bool
     {
-        return ($lot->seller_id === $user->id || $user->isArbiter())
-            ? Response::allow()
-            : Response::deny('Вы можете удалять только свои лоты.');
+        return ($user->id === $lot->seller_id || $user->isArbiter()) && $user->status->canTrade();
     }
 
-    /**
-     * Покупать лот может любой пользователь, кроме самого продавца.
-     */
-    public function purchase(User $user, Lot $lot): Response
+    public function delete(User $user, Lot $lot): bool
     {
-        return $lot->seller_id !== $user->id
-            ? Response::allow()
-            : Response::deny('Нельзя купить собственный лот.');
+        return $user->id === $lot->seller_id || $user->isArbiter();
+    }
+
+    public function purchase(User $user, Lot $lot): bool
+    {
+        return $user->id !== $lot->seller_id
+            && $user->status->canTrade()
+            && $lot->stock_quantity > 0;
     }
 }

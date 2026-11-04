@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Enums\LotStatus;
 use App\Enums\OrderStatus;
 use App\Enums\TransactionType;
 use App\Models\Lot;
@@ -11,261 +12,309 @@ use App\Models\Message;
 use App\Models\Order;
 use App\Models\Review;
 use App\Models\User;
+use App\Models\WalletTransaction;
 use DomainException;
 use Illuminate\Support\Facades\DB;
 
 class EscrowService
 {
-    private const PLATFORM_FEE_RATE = 0.05;
+    public const PLATFORM_FEE_RATE = 0.05;
 
-    public function __construct(
-        private readonly WalletService $walletService
-    ) {}
-
-    public function purchaseLot(int $buyerId, int $lotId, int $quantity = 1): Order
+    public function purchaseLot(User|int $buyerId, Lot|int $lotId, int $quantity = 1): Order
     {
-        return DB::transaction(function () use ($buyerId, $lotId, $quantity): Order {
-            $lot = Lot::where('id', $lotId)->lockForUpdate()->firstOrFail();
-            $buyer = User::where('id', $buyerId)->lockForUpdate()->firstOrFail();
+        if ($quantity < 1) {
+            throw new DomainException('Количество должно быть не менее 1 шт.');
+        }
 
-            if ($lot->seller_id === $buyer->id) {
-                throw new DomainException('Нельзя купить собственный лот.');
+        $resolvedBuyerId = $buyerId instanceof User ? $buyerId->id : $buyerId;
+        $resolvedLotId = $lotId instanceof Lot ? $lotId->id : $lotId;
+
+        return DB::transaction(function () use ($resolvedBuyerId, $resolvedLotId, $quantity): Order {
+            /** @var Lot $lockedLot */
+            $lockedLot = Lot::whereKey($resolvedLotId)->lockForUpdate()->firstOrFail();
+            /** @var User $lockedBuyer */
+            $lockedBuyer = User::whereKey($resolvedBuyerId)->lockForUpdate()->firstOrFail();
+
+            if ($lockedBuyer->id === $lockedLot->seller_id) {
+                throw new DomainException('Вы не можете купить собственный лот.');
             }
 
-            if ($lot->stock_quantity < $quantity) {
-                throw new DomainException('Товара нет в нужном количестве.');
+            if (! $lockedBuyer->status->canTrade()) {
+                throw new DomainException('Ваш аккаунт не может совершать покупки.');
             }
 
-            $totalPrice = round((float) $lot->price * $quantity, 2);
+            if ($lockedLot->status !== LotStatus::Active || $lockedLot->stock_quantity < $quantity) {
+                throw new DomainException("Недостаточно товара в наличии (доступно: {$lockedLot->stock_quantity} шт.).");
+            }
 
-            $lot->decrement('stock_quantity', $quantity);
+            $unitPrice = (float) $lockedLot->price;
+            $totalPrice = round($unitPrice * $quantity, 2);
 
-            $initialStatus = $lot->hasAutoDelivery()
-                ? OrderStatus::Shipped
-                : OrderStatus::Paid;
+            if ((float) $lockedBuyer->wallet_balance < $totalPrice) {
+                throw new DomainException('Недостаточно средств на балансе кошелька.');
+            }
 
-            $order = Order::create([
-                'lot_id' => $lot->id,
-                'buyer_id' => $buyer->id,
-                'seller_id' => $lot->seller_id,
-                'quantity' => $quantity,
-                'unit_price' => $lot->price,
-                'total_price' => $totalPrice,
-                'status' => $initialStatus,
+            $newBalance = round((float) $lockedBuyer->wallet_balance - $totalPrice, 2);
+            $lockedBuyer->update(['wallet_balance' => $newBalance]);
+
+            $newStock = $lockedLot->stock_quantity - $quantity;
+            $lockedLot->update([
+                'stock_quantity' => $newStock,
+                'status' => $newStock === 0 ? LotStatus::Sold : LotStatus::Active,
             ]);
 
-            $this->walletService->applyBalanceChange(
-                $buyer,
-                -$totalPrice,
-                TransactionType::Purchase,
-                $order->id
-            );
+            $hasAutoDelivery = $lockedLot->hasAutoDelivery();
 
-            $this->logSystemMessage(
-                $order,
-                $buyer->id,
-                "Покупатель {$buyer->username} оплатил заказ. Средства ({$totalPrice} ₽) заморожены гарантом SportPay."
-            );
+            /** @var Order $order */
+            $order = Order::create([
+                'lot_id' => $lockedLot->id,
+                'buyer_id' => $lockedBuyer->id,
+                'seller_id' => $lockedLot->seller_id,
+                'quantity' => $quantity,
+                'unit_price' => $unitPrice,
+                'total_price' => $totalPrice,
+                'status' => $hasAutoDelivery ? OrderStatus::Shipped : OrderStatus::Paid,
+            ]);
 
-            if ($lot->hasAutoDelivery()) {
-                $this->logSystemMessage(
-                    $order,
-                    $lot->seller_id,
-                    "⚡ АВТОВЫДАЧА ТОВАРА: {$lot->auto_delivery_text}"
-                );
+            WalletTransaction::create([
+                'user_id' => $lockedBuyer->id,
+                'order_id' => $order->id,
+                'type' => TransactionType::Purchase,
+                'amount' => -$totalPrice,
+                'balance_after' => $newBalance,
+            ]);
+
+            Message::create([
+                'order_id' => $order->id,
+                'user_id' => $lockedBuyer->id,
+                'body' => "Сделка #{$order->id} оплачена ({$quantity} шт., {$totalPrice} ₽ заморожено в эскроу SportPay).",
+                'is_system' => true,
+            ]);
+
+            if ($hasAutoDelivery) {
+                Message::create([
+                    'order_id' => $order->id,
+                    'user_id' => $lockedLot->seller_id,
+                    'body' => "⚡ АВТОВЫДАЧА SportPay: {$lockedLot->auto_delivery_text}",
+                    'is_system' => true,
+                ]);
             }
 
             return $order;
         });
     }
 
-    public function confirmOrder(int $orderId, int $buyerId, ?int $rating = null, ?string $comment = null): Order
-    {
-        return DB::transaction(function () use ($orderId, $buyerId, $rating, $comment): Order {
-            $order = Order::where('id', $orderId)->lockForUpdate()->firstOrFail();
+    public function confirmOrder(
+        Order|int $orderId,
+        User|int $actorId,
+        int $rating = 5,
+        ?string $comment = null
+    ): Order {
+        $resolvedOrderId = $orderId instanceof Order ? $orderId->id : $orderId;
+        $resolvedActorId = $actorId instanceof User ? $actorId->id : $actorId;
 
-            if ($order->buyer_id !== $buyerId) {
-                throw new DomainException('Только покупатель может подтвердить выполнение заказа.');
+        return DB::transaction(function () use ($resolvedOrderId, $resolvedActorId, $rating, $comment): Order {
+            /** @var Order $lockedOrder */
+            $lockedOrder = Order::whereKey($resolvedOrderId)->lockForUpdate()->firstOrFail();
+            /** @var User $actor */
+            $actor = User::whereKey($resolvedActorId)->firstOrFail();
+
+            if ($lockedOrder->buyer_id !== $actor->id && ! $actor->isArbiter()) {
+                throw new DomainException('Подтвердить выполнение заказа может только покупатель или арбитр.');
             }
 
-            if (!$order->status->isConfirmable()) {
-                throw new DomainException('Заказ уже закрыт или отменен.');
+            if (! $lockedOrder->status->isConfirmable()) {
+                throw new DomainException('Заказ уже завершен или отменен.');
             }
 
-            $seller = User::where('id', $order->seller_id)->lockForUpdate()->firstOrFail();
-            $sellerPayout = round((float) $order->total_price * (1 - self::PLATFORM_FEE_RATE), 2);
+            /** @var User $seller */
+            $seller = User::whereKey($lockedOrder->seller_id)->lockForUpdate()->firstOrFail();
 
-            $order->update(['status' => OrderStatus::Completed]);
+            $totalPrice = (float) $lockedOrder->total_price;
+            $fee = round($totalPrice * self::PLATFORM_FEE_RATE, 2);
+            $payout = round($totalPrice - $fee, 2);
 
-            $this->walletService->applyBalanceChange(
-                $seller,
-                $sellerPayout,
-                TransactionType::Payout,
-                $order->id
-            );
+            $newSellerBalance = round((float) $seller->wallet_balance + $payout, 2);
+            $seller->update(['wallet_balance' => $newSellerBalance]);
 
-            if ($rating !== null) {
-                $this->recordReview($order, $buyerId, $seller, $rating, $comment);
+            $lockedOrder->update(['status' => OrderStatus::Completed]);
+
+            WalletTransaction::create([
+                'user_id' => $seller->id,
+                'order_id' => $lockedOrder->id,
+                'type' => TransactionType::Payout,
+                'amount' => $payout,
+                'balance_after' => $newSellerBalance,
+            ]);
+
+            if ($lockedOrder->buyer_id === $actor->id) {
+                $clampedRating = max(1, min(5, $rating));
+
+                Review::updateOrCreate(
+                    ['order_id' => $lockedOrder->id],
+                    [
+                        'lot_id' => $lockedOrder->lot_id,
+                        'author_id' => $actor->id,
+                        'seller_id' => $seller->id,
+                        'rating' => $clampedRating,
+                        'comment' => filled($comment) ? trim((string) $comment) : 'Сделка прошла отлично!',
+                    ]
+                );
+
+                $avgRating = Review::where('seller_id', $seller->id)->avg('rating');
+                if ($avgRating !== null) {
+                    $seller->update(['rating' => round((float) $avgRating, 2)]);
+                }
             }
 
-            $this->logSystemMessage(
-                $order,
-                $buyerId,
-                "Покупатель подтвердил выполнение заказа. Продавцу выплачено {$sellerPayout} ₽ (комиссия биржи 5%)."
-            );
+            Message::create([
+                'order_id' => $lockedOrder->id,
+                'user_id' => $actor->id,
+                'body' => "Заказ #{$lockedOrder->id} подтвержден! Продавцу перечислено {$payout} ₽ (комиссия биржи 5%: {$fee} ₽).",
+                'is_system' => true,
+            ]);
 
-            return $order;
+            return $lockedOrder;
         });
     }
 
-    public function openDispute(int $orderId, int $actorId, string $reason): Order
+    public function openDispute(Order|int $orderId, User|int $actorId, string $reason = 'Открыт спор'): Order
     {
-        return DB::transaction(function () use ($orderId, $actorId, $reason): Order {
-            $order = Order::where('id', $orderId)->lockForUpdate()->firstOrFail();
-            $actor = User::findOrFail($actorId);
+        $resolvedOrderId = $orderId instanceof Order ? $orderId->id : $orderId;
+        $resolvedActorId = $actorId instanceof User ? $actorId->id : $actorId;
 
-            if (!$order->isParticipant($actor)) {
-                throw new DomainException('Только участник сделки может открыть спор.');
+        return DB::transaction(function () use ($resolvedOrderId, $resolvedActorId, $reason): Order {
+            /** @var Order $lockedOrder */
+            $lockedOrder = Order::whereKey($resolvedOrderId)->lockForUpdate()->firstOrFail();
+            /** @var User $actor */
+            $actor = User::whereKey($resolvedActorId)->firstOrFail();
+
+            if ($lockedOrder->buyer_id !== $actor->id && $lockedOrder->seller_id !== $actor->id) {
+                throw new DomainException('Только участники сделки могут открыть спор.');
             }
 
-            if (!$order->status->isDisputable()) {
-                throw new DomainException('По данному заказу спор уже открыт или сделка завершена.');
+            if (! $lockedOrder->status->isDisputable()) {
+                throw new DomainException('По данному заказу нельзя открыть спор.');
             }
 
-            $order->update(['status' => OrderStatus::Disputed]);
+            $lockedOrder->update(['status' => OrderStatus::Disputed]);
 
-            $this->logSystemMessage(
-                $order,
-                $actor->id,
-                "⚠️ {$actor->username} открыл арбитражный спор! Причина: «{$reason}». Выплата заморожена, к сделке подключен арбитр SportPay."
-            );
+            Message::create([
+                'order_id' => $lockedOrder->id,
+                'user_id' => $actor->id,
+                'body' => "⚠️ Открыт арбитражный спор пользователем {$actor->username}. Причина: {$reason}",
+                'is_system' => true,
+            ]);
 
-            return $order;
+            return $lockedOrder;
         });
     }
 
-    public function resolveDispute(int $orderId, int $arbiterId, string $decision, ?string $comment = null): Order
+    public function resolveDispute(
+        Order|int $orderId,
+        User|int $arbiterId,
+        string $decision,
+        ?string $comment = null
+    ): Order {
+        $resolvedOrderId = $orderId instanceof Order ? $orderId->id : $orderId;
+        $resolvedArbiterId = $arbiterId instanceof User ? $arbiterId->id : $arbiterId;
+
+        /** @var Order $order */
+        $order = Order::findOrFail($resolvedOrderId);
+        /** @var User $arbiter */
+        $arbiter = User::findOrFail($resolvedArbiterId);
+
+        if (! $arbiter->isArbiter()) {
+            throw new DomainException('Только официальный арбитр может выносить решение по спору.');
+        }
+
+        if ($order->status !== OrderStatus::Disputed) {
+            throw new DomainException('Сделка не находится в статусе спора.');
+        }
+
+        $note = filled($comment) ? " Комментарий арбитра: {$comment}" : '';
+
+        if ($decision === 'refund_buyer') {
+            $resolved = $this->cancelOrder($order, $arbiter);
+            Message::create([
+                'order_id' => $resolved->id,
+                'user_id' => $arbiter->id,
+                'body' => "⚖️ Решение Арбитра: возврат 100% средств покупателю.{$note}",
+                'is_system' => true,
+            ]);
+
+            return $resolved;
+        }
+
+        if ($decision === 'release_seller') {
+            $resolved = $this->confirmOrder($order, $arbiter);
+            Message::create([
+                'order_id' => $resolved->id,
+                'user_id' => $arbiter->id,
+                'body' => "⚖️ Решение Арбитра: выплата средств продавцу.{$note}",
+                'is_system' => true,
+            ]);
+
+            return $resolved;
+        }
+
+        throw new DomainException('Неизвестное решение арбитра.');
+    }
+
+    public function cancelOrder(Order|int $orderId, User|int $actorId): Order
     {
-        return DB::transaction(function () use ($orderId, $arbiterId, $decision, $comment): Order {
-            $arbiter = User::findOrFail($arbiterId);
+        $resolvedOrderId = $orderId instanceof Order ? $orderId->id : $orderId;
+        $resolvedActorId = $actorId instanceof User ? $actorId->id : $actorId;
 
-            if (!$arbiter->isArbiter()) {
-                throw new DomainException('Только официальный арбитр SportPay может выносить решение по спору.');
+        return DB::transaction(function () use ($resolvedOrderId, $resolvedActorId): Order {
+            /** @var Order $lockedOrder */
+            $lockedOrder = Order::whereKey($resolvedOrderId)->lockForUpdate()->firstOrFail();
+            /** @var User $actor */
+            $actor = User::whereKey($resolvedActorId)->firstOrFail();
+
+            if ($lockedOrder->seller_id !== $actor->id && ! $actor->isArbiter()) {
+                throw new DomainException('Отменить оплаченный заказ и вернуть средства может только продавец или арбитр.');
             }
 
-            $order = Order::where('id', $orderId)->lockForUpdate()->firstOrFail();
-
-            if ($order->status !== OrderStatus::Disputed) {
-                throw new DomainException('Решение можно вынести только по заказу в статусе спора.');
+            if (! $lockedOrder->status->isConfirmable()) {
+                throw new DomainException('Заказ уже завершен или отменен.');
             }
 
-            $verdictNote = $comment ? " Комментарий арбитра: «{$comment}»." : '';
+            /** @var User $buyer */
+            $buyer = User::whereKey($lockedOrder->buyer_id)->lockForUpdate()->firstOrFail();
+            /** @var Lot|null $lot */
+            $lot = Lot::whereKey($lockedOrder->lot_id)->lockForUpdate()->first();
 
-            if ($decision === 'refund_buyer') {
-                $buyer = User::where('id', $order->buyer_id)->lockForUpdate()->firstOrFail();
+            $refundAmount = (float) $lockedOrder->total_price;
+            $newBuyerBalance = round((float) $buyer->wallet_balance + $refundAmount, 2);
+            $buyer->update(['wallet_balance' => $newBuyerBalance]);
 
-                Lot::where('id', $order->lot_id)->increment('stock_quantity', $order->quantity);
-                $order->update(['status' => OrderStatus::Cancelled]);
-
-                $this->walletService->applyBalanceChange(
-                    $buyer,
-                    (float) $order->total_price,
-                    TransactionType::Deposit,
-                    $order->id
-                );
-
-                $this->logSystemMessage(
-                    $order,
-                    $arbiter->id,
-                    "⚖️ Арбитр {$arbiter->username} решил спор в пользу покупателя. Средства ({$order->total_price} ₽) возвращены покупателю.{$verdictNote}"
-                );
-
-                return $order;
+            if ($lot !== null) {
+                $restoredStock = $lot->stock_quantity + $lockedOrder->quantity;
+                $lot->update([
+                    'stock_quantity' => $restoredStock,
+                    'status' => LotStatus::Active,
+                ]);
             }
 
-            if ($decision === 'release_seller') {
-                $seller = User::where('id', $order->seller_id)->lockForUpdate()->firstOrFail();
-                $sellerPayout = round((float) $order->total_price * (1 - self::PLATFORM_FEE_RATE), 2);
+            $lockedOrder->update(['status' => OrderStatus::Cancelled]);
 
-                $order->update(['status' => OrderStatus::Completed]);
+            WalletTransaction::create([
+                'user_id' => $buyer->id,
+                'order_id' => $lockedOrder->id,
+                'type' => TransactionType::Deposit,
+                'amount' => $refundAmount,
+                'balance_after' => $newBuyerBalance,
+            ]);
 
-                $this->walletService->applyBalanceChange(
-                    $seller,
-                    $sellerPayout,
-                    TransactionType::Payout,
-                    $order->id
-                );
+            Message::create([
+                'order_id' => $lockedOrder->id,
+                'user_id' => $actor->id,
+                'body' => "Заказ #{$lockedOrder->id} отменен. Покупателю возвращено {$refundAmount} ₽, товар ({$lockedOrder->quantity} шт.) возвращен на склад.",
+                'is_system' => true,
+            ]);
 
-                $this->logSystemMessage(
-                    $order,
-                    $arbiter->id,
-                    "⚖️ Арбитр {$arbiter->username} решил спор в пользу продавца. Выплата ({$sellerPayout} ₽) переведена продавцу.{$verdictNote}"
-                );
-
-                return $order;
-            }
-
-            throw new DomainException('Неизвестный тип решения арбитража.');
+            return $lockedOrder;
         });
-    }
-
-    public function cancelAndRefundOrder(int $orderId, int $actorId): Order
-    {
-        return DB::transaction(function () use ($orderId, $actorId): Order {
-            $order = Order::where('id', $orderId)->lockForUpdate()->firstOrFail();
-
-            if ($order->buyer_id === $actorId && $order->status !== OrderStatus::Disputed) {
-                throw new DomainException('Покупатель не может отменить оплаченный заказ напрямую. Откройте спор или попросите продавца сделать возврат.');
-            }
-
-            if (!$order->status->isConfirmable()) {
-                throw new DomainException('Невозможно вернуть средства по завершенному заказу.');
-            }
-
-            $buyer = User::where('id', $order->buyer_id)->lockForUpdate()->firstOrFail();
-
-            Lot::where('id', $order->lot_id)->increment('stock_quantity', $order->quantity);
-            $order->update(['status' => OrderStatus::Cancelled]);
-
-            $this->walletService->applyBalanceChange(
-                $buyer,
-                (float) $order->total_price,
-                TransactionType::Deposit,
-                $order->id
-            );
-
-            $this->logSystemMessage(
-                $order,
-                $actorId,
-                "Заказ отменен продавцом. Средства ({$order->total_price} ₽) полностью возвращены покупателю."
-            );
-
-            return $order;
-        });
-    }
-
-    private function recordReview(Order $order, int $buyerId, User $seller, int $rating, ?string $comment): void
-    {
-        Review::create([
-            'order_id' => $order->id,
-            'author_id' => $buyerId,
-            'seller_id' => $seller->id,
-            'lot_id' => $order->lot_id,
-            'rating' => $rating,
-            'comment' => $comment ?: 'Сделка прошла отлично!',
-        ]);
-
-        $avgRating = Review::where('seller_id', $seller->id)->avg('rating') ?? 5.00;
-        $seller->update(['rating' => round((float) $avgRating, 2)]);
-    }
-
-    private function logSystemMessage(Order $order, int $userId, string $text): void
-    {
-        Message::create([
-            'order_id' => $order->id,
-            'user_id' => $userId,
-            'body' => $text,
-            'is_system' => true,
-        ]);
     }
 }

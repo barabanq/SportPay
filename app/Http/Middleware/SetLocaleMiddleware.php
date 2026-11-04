@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace App\Http\Middleware;
 
+use App\Models\User;
 use Closure;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\App;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Schema;
@@ -21,10 +23,10 @@ class SetLocaleMiddleware
             App::setLocale($locale);
         }
 
-        if (Auth::check() && Schema::hasColumn('users', 'last_seen_at')) {
-            /** @var \App\Models\User $user */
+        if (! app()->runningInConsole() && Auth::check() && Schema::hasColumn('users', 'last_seen_at')) {
+            /** @var User|null $user */
             $user = Auth::user();
-            if ($user->last_seen_at === null || $user->last_seen_at->lt(now()->subMinute())) {
+            if ($user !== null && (! $user->last_seen_at instanceof Carbon || $user->last_seen_at->lt(now()->subMinute()))) {
                 $user->timestamps = false;
                 $user->update(['last_seen_at' => now()]);
                 $user->timestamps = true;

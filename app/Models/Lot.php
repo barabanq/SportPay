@@ -10,8 +10,24 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Storage;
 
+/**
+ * @property int $id
+ * @property int $seller_id
+ * @property string $title
+ * @property string $product_type
+ * @property string|null $description
+ * @property string|null $image_path
+ * @property string|null $auto_delivery_text
+ * @property string|float $price
+ * @property int $stock_quantity
+ * @property LotStatus $status
+ * @property Carbon|null $created_at
+ * @property Carbon|null $updated_at
+ * @property-read User|null $seller
+ */
 class Lot extends Model
 {
     use HasFactory;
@@ -39,7 +55,7 @@ class Lot extends Model
 
     public function imageUrl(): ?string
     {
-        if (!filled($this->image_path)) {
+        if (! filled($this->image_path)) {
             return null;
         }
 
@@ -70,9 +86,6 @@ class Lot extends Model
         return $this->hasMany(Review::class, 'lot_id');
     }
 
-    /**
-     * Фильтрация активных лотов по категории, поиску, диапазону цен, продавцу и онлайн-статусу
-     */
     public function scopeFilter(
         Builder $query,
         ?string $type = null,
@@ -87,7 +100,7 @@ class Lot extends Model
             ->where('lots.status', LotStatus::Active)
             ->when($type, fn (Builder $q) => $q->where('lots.product_type', $type))
             ->when($search, function (Builder $q) use ($search): void {
-                $term = '%' . trim($search) . '%';
+                $term = '%'.trim($search).'%';
                 $q->where(function (Builder $sub) use ($term): void {
                     $sub->where('lots.title', 'like', $term)
                         ->orWhere('lots.description', 'like', $term);
@@ -101,7 +114,7 @@ class Lot extends Model
                     if (is_numeric($cleanSeller)) {
                         $sq->where('users.id', (int) $cleanSeller);
                     } else {
-                        $sq->where('users.username', 'like', '%' . $cleanSeller . '%');
+                        $sq->where('users.username', 'like', '%'.$cleanSeller.'%');
                     }
                 });
             })
@@ -110,9 +123,6 @@ class Lot extends Model
             });
     }
 
-    /**
-     * Безопасная сортировка по цене, рейтингу продавца, онлайн-статусу или новизне
-     */
     public function scopeSortBy(Builder $query, ?string $sort): Builder
     {
         $threshold = now()->subMinutes(5)->toDateTimeString();

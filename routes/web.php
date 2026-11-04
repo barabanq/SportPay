@@ -2,17 +2,17 @@
 
 declare(strict_types=1);
 
-use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\ArbitrationController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ChatController;
+use App\Http\Controllers\GlobalChatController;
 use App\Http\Controllers\LotController;
 use App\Http\Controllers\MarketplaceController;
 use App\Http\Controllers\OrderController;
 use App\Http\Controllers\ProfileController;
-use App\Http\Controllers\WalletController;
-use App\Http\Controllers\ArbitrationController;
-use App\Http\Controllers\GlobalChatController;
 use App\Http\Controllers\SupportController;
+use App\Http\Controllers\WalletController;
+use Illuminate\Support\Facades\Route;
 
 // Аутентификация (Вход / Регистрация / Выход)
 Route::get('/login', [AuthController::class, 'showLogin'])->name('login');
