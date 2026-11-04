@@ -5,9 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
     <title>@yield('title', 'SportPay — P2P Sports Marketplace')</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://js.pusher.com/8.2.0/pusher.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/laravel-echo@1.16.1/dist/echo.iife.js"></script>
+    @php
+        $viteReady = file_exists(public_path('hot'));
+        if (!$viteReady && file_exists(public_path('build/manifest.json'))) {
+            $manifest = json_decode((string) file_get_contents(public_path('build/manifest.json')), true);
+            $viteReady = is_array($manifest) && isset($manifest['resources/js/app.js']);
+        }
+    @endphp
+    @if ($viteReady)
+        @vite(['resources/js/app.js'])
+    @endif
     <style>
+        [v-cloak] { display: none; }
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
     </style>
@@ -26,16 +38,17 @@
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased">
 
-<header class="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-40">
+<!-- Реактивная шапка на Vue 3 (работает всегда: и с Vite, и через встроенный Vue 3 инстанс) -->
+<header id="sportpay-header-vue" class="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-40">
     <div class="max-w-7xl mx-auto px-3 sm:px-4 py-2.5 sm:py-3">
-        <!-- Верхняя полоса шапки (Лого + быстрые контролы на мобилках) -->
         <div class="flex items-center justify-between gap-2">
+            <!-- Лого + Переключатель RU / EN -->
             <div class="flex items-center gap-2 sm:gap-3">
-                <a href="{{ route('home') }}" class="text-xl sm:text-2xl font-extrabold tracking-tight text-emerald-400">
-                    SPORT<span class="text-white">PAY</span>
+                <a href="{{ route('home') }}" class="text-xl sm:text-2xl font-extrabold tracking-tight text-emerald-400 flex items-center gap-1.5">
+                    <span>SPORT<span class="text-white">PAY</span></span>
+                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono uppercase">Vue 3</span>
                 </a>
 
-                <!-- Переключатель языка RU / EN -->
                 <form action="{{ route('locale.switch') }}" method="POST" class="inline-flex rounded-xl bg-slate-950 p-0.5 border border-slate-800">
                     @csrf
                     <button type="submit" name="locale" value="ru" class="px-2 py-1 rounded-lg text-[11px] font-extrabold transition {{ app()->getLocale() === 'ru' ? 'bg-emerald-500 text-slate-950' : 'text-slate-400 hover:text-white' }}">
@@ -47,7 +60,7 @@
                 </form>
             </div>
 
-            <!-- Десктопная навигация -->
+            <!-- Десктопное меню -->
             <nav class="hidden lg:flex items-center gap-1.5">
                 <a href="{{ route('home') }}" class="text-xs px-3 py-2 rounded-lg {{ request()->routeIs('home') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
                     {{ __('Каталог лотов') }}
@@ -79,16 +92,16 @@
                     @endif
                 </a>
 
-                <!-- Выпадающее меню «Помощь» -->
-                <div class="relative" id="help-dropdown-container">
-                    <button type="button" id="help-dropdown-btn" class="text-xs px-3 py-2 rounded-lg {{ request()->routeIs('support.*') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition flex items-center gap-1">
+                <!-- Выпадающее меню «Помощь» под управлением Vue 3 -->
+                <div class="relative">
+                    <button type="button" @click.stop="helpOpen = !helpOpen" class="text-xs px-3 py-2 rounded-lg {{ request()->routeIs('support.*') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition flex items-center gap-1">
                         <span>{{ __('Помощь') }}</span>
-                        <svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <svg class="w-3.5 h-3.5 text-slate-400 transition-transform" :class="{ 'rotate-180': helpOpen }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
                         </svg>
                     </button>
 
-                    <div id="help-dropdown-menu" class="hidden absolute left-0 mt-2 w-48 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl py-1.5 z-50 divide-y divide-slate-800/80 text-xs">
+                    <div v-cloak v-show="helpOpen" class="absolute left-0 mt-2 w-48 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl py-1.5 z-50 divide-y divide-slate-800/80 text-xs">
                         <div class="py-1">
                             <a href="{{ route('support.rules') }}" class="block px-4 py-2 text-slate-200 hover:bg-slate-800 hover:text-emerald-400 transition">
                                 📜 {{ __('Правила') }}
@@ -102,14 +115,14 @@
                                 ✉️ {{ __('Отправить запрос') }}
                             </a>
                             <a href="{{ route('support.tickets.index') }}" class="block px-4 py-2 text-slate-200 hover:bg-slate-800 hover:text-emerald-400 transition">
-                                �� {{ __('Мои запросы') }}
+                                📂 {{ __('Мои запросы') }}
                             </a>
                         </div>
                     </div>
                 </div>
             </nav>
 
-            <!-- Правый блок (Баланс + Профиль + Кнопка мобильного меню) -->
+            <!-- Правая панель: Баланс, Профиль, Dev-переключатель и Мобильный бургер -->
             <div class="flex items-center gap-2">
                 @if(isset($user))
                     <a href="{{ route('wallet.index') }}" class="bg-slate-800/90 hover:bg-slate-800 px-2.5 sm:px-3.5 py-1.5 rounded-xl border border-slate-700 transition">
@@ -119,8 +132,8 @@
                         </div>
                     </a>
 
-                    <a href="{{ route('users.show', $user->id) }}" class="hidden sm:inline-flex text-xs text-slate-200 hover:text-emerald-400 font-bold px-3 py-2 rounded-xl bg-slate-800/80 border border-slate-700 transition">
-                        👤 {{ $user->username }}
+                    <a href="{{ route('users.show', $user->id) }}" class="hidden sm:inline-flex items-center gap-1.5 text-xs text-slate-200 hover:text-emerald-400 font-bold px-3 py-2 rounded-xl bg-slate-800/80 border border-slate-700 transition">
+                        <span>👤 {{ $user->username }}</span>
                     </a>
 
                     <form action="{{ route('logout') }}" method="POST" class="hidden sm:block">
@@ -149,8 +162,7 @@
                     </form>
                 @endif
 
-                <!-- Бургер-кнопка для телефонов и планшетов -->
-                <button type="button" id="mobile-menu-btn" aria-label="Menu" class="lg:hidden p-2 rounded-xl bg-slate-800 border border-slate-700 text-slate-200 hover:text-emerald-400">
+                <button type="button" @click="mobileOpen = !mobileOpen" aria-label="Menu" class="lg:hidden p-2 rounded-xl bg-slate-800 border border-slate-700 text-slate-200 hover:text-emerald-400">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
                     </svg>
@@ -158,8 +170,8 @@
             </div>
         </div>
 
-        <!-- Выпадающее мобильное меню для смартфонов -->
-        <div id="mobile-menu-panel" class="hidden lg:hidden mt-3 pt-3 border-t border-slate-800 space-y-3">
+        <!-- Выпадающее мобильное меню под управлением Vue 3 -->
+        <div v-cloak v-show="mobileOpen" class="lg:hidden mt-3 pt-3 border-t border-slate-800 space-y-3">
             <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
                 <a href="{{ route('home') }}" class="px-3 py-2.5 rounded-xl {{ request()->routeIs('home') ? 'bg-emerald-500 text-slate-950 font-extrabold' : 'bg-slate-800/80 text-slate-200 font-semibold' }}">
                     🏪 {{ __('Каталог лотов') }}
@@ -185,46 +197,6 @@
                 <a href="{{ route('support.help') }}" class="px-3 py-2.5 rounded-xl bg-slate-800/80 text-slate-200 font-semibold">
                     💡 {{ __('Центр помощи') }}
                 </a>
-                <a href="{{ route('support.rules') }}" class="px-3 py-2.5 rounded-xl bg-slate-800/80 text-slate-200 font-semibold">
-                    📜 {{ __('Правила') }}
-                </a>
-                <a href="{{ route('support.tickets.create') }}" class="px-3 py-2.5 rounded-xl bg-slate-800/80 text-slate-200 font-semibold">
-                    ✉️ {{ __('Отправить запрос') }}
-                </a>
-                <a href="{{ route('support.tickets.index') }}" class="px-3 py-2.5 rounded-xl bg-slate-800/80 text-slate-200 font-semibold">
-                    📂 {{ __('Мои запросы') }}
-                </a>
-            </div>
-
-            <div class="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800/80">
-                @if(isset($user))
-                    <a href="{{ route('users.show', $user->id) }}" class="text-xs font-bold text-emerald-400">
-                        👤 {{ $user->username }}
-                    </a>
-                @endif
-
-                @if(isset($allUsers) && $allUsers->isNotEmpty())
-                    <form action="{{ route('user.switch') }}" method="POST" class="flex items-center gap-1.5">
-                        @csrf
-                        <span class="text-[10px] text-slate-400 uppercase font-bold">Dev:</span>
-                        <select name="user_id" onchange="this.form.submit()" class="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white font-semibold">
-                            @foreach ($allUsers as $u)
-                                <option value="{{ $u->id }}" @selected(isset($user) && $user->id === $u->id)>
-                                    {{ $u->username }} ({{ number_format((float) $u->wallet_balance, 0, '.', ' ') }} ₽)
-                                </option>
-                            @endforeach
-                        </select>
-                    </form>
-                @endif
-
-                @if(isset($user))
-                    <form action="{{ route('logout') }}" method="POST">
-                        @csrf
-                        <button type="submit" class="px-3 py-1.5 rounded-lg bg-rose-500/15 text-rose-300 text-xs font-bold">
-                            {{ __('Выйти') }}
-                        </button>
-                    </form>
-                @endif
             </div>
         </div>
     </div>
@@ -253,32 +225,19 @@
 </main>
 
 <script>
-(function () {
-    const btn = document.getElementById('help-dropdown-btn');
-    const menu = document.getElementById('help-dropdown-menu');
-    const container = document.getElementById('help-dropdown-container');
-
-    if (btn && menu && container) {
-        btn.addEventListener('click', function (e) {
-            e.stopPropagation();
-            menu.classList.toggle('hidden');
-        });
-
-        document.addEventListener('click', function (e) {
-            if (!container.contains(e.target)) {
-                menu.classList.add('hidden');
-            }
-        });
-    }
-
-    const mobileBtn = document.getElementById('mobile-menu-btn');
-    const mobilePanel = document.getElementById('mobile-menu-panel');
-    if (mobileBtn && mobilePanel) {
-        mobileBtn.addEventListener('click', function () {
-            mobilePanel.classList.toggle('hidden');
-        });
-    }
-})();
+if (window.Vue && document.getElementById('sportpay-header-vue')) {
+    const { createApp, ref, onMounted, onBeforeUnmount } = window.Vue;
+    createApp({
+        setup() {
+            const helpOpen = ref(false);
+            const mobileOpen = ref(false);
+            const closeHelp = () => { helpOpen.value = false; };
+            onMounted(() => document.addEventListener('click', closeHelp));
+            onBeforeUnmount(() => document.removeEventListener('click', closeHelp));
+            return { helpOpen, mobileOpen };
+        }
+    }).mount('#sportpay-header-vue');
+}
 </script>
 </body>
 </html>

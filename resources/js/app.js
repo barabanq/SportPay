@@ -1,27 +1,31 @@
-import '../css/app.css';
 import './bootstrap';
+import { createApp } from 'vue';
 
-import { createInertiaApp } from '@inertiajs/vue3';
-import { resolvePageComponent } from 'laravel-vite-plugin/inertia-helpers';
-import { createApp, h } from 'vue';
-import { ZiggyVue } from '../../vendor/tightenco/ziggy';
+import NavbarApp from './components/NavbarApp.vue';
+import MarketplacePage from './components/MarketplacePage.vue';
+import LotShowPage from './components/LotShowPage.vue';
+import OrderShowPage from './components/OrderShowPage.vue';
+import GlobalChatPage from './components/GlobalChatPage.vue';
+import WalletPage from './components/WalletPage.vue';
+import ArbitrationPage from './components/ArbitrationPage.vue';
 
-const appName = import.meta.env.VITE_APP_NAME || 'Laravel';
+// Монтируем шапку отдельно, чтобы не затрагивать Blade-скрипты внутри @yield('content')
+const navEl = document.getElementById('sportpay-navbar-mount');
+if (navEl) {
+    const navApp = createApp({});
+    navApp.component('navbar-app', NavbarApp);
+    navApp.mount('#sportpay-navbar-mount');
+}
 
-createInertiaApp({
-    title: (title) => `${title} - ${appName}`,
-    resolve: (name) =>
-        resolvePageComponent(
-            `./Pages/${name}.vue`,
-            import.meta.glob('./Pages/**/*.vue'),
-        ),
-    setup({ el, App, props, plugin }) {
-        return createApp({ render: () => h(App, props) })
-            .use(plugin)
-            .use(ZiggyVue)
-            .mount(el);
-    },
-    progress: {
-        color: '#4B5563',
-    },
-});
+// Монтируем страничные Vue-компоненты, если на странице есть #sportpay-page-mount
+const pageEl = document.getElementById('sportpay-page-mount');
+if (pageEl) {
+    const pageApp = createApp({});
+    pageApp.component('marketplace-page', MarketplacePage);
+    pageApp.component('lot-show-page', LotShowPage);
+    pageApp.component('order-show-page', OrderShowPage);
+    pageApp.component('global-chat-page', GlobalChatPage);
+    pageApp.component('wallet-page', WalletPage);
+    pageApp.component('arbitration-page', ArbitrationPage);
+    pageApp.mount('#sportpay-page-mount');
+}
