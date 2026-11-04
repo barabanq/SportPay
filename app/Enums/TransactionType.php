@@ -14,10 +14,10 @@ enum TransactionType: string
     public function label(): string
     {
         return match ($this) {
-            self::Deposit => 'ПОПОЛНЕНИЕ',
-            self::Withdraw => 'ВЫВОД',
-            self::Purchase => 'ПОКУПКА (ХОЛД)',
-            self::Payout => 'ВЫПЛАТА С ПРОДАЖИ',
+            self::Deposit => __('ПОПОЛНЕНИЕ'),
+            self::Withdraw => __('ВЫВОД'),
+            self::Purchase => __('ПОКУПКА (ХОЛД)'),
+            self::Payout => __('ВЫПЛАТА С ПРОДАЖИ'),
         };
     }
 }

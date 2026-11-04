@@ -10,6 +10,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\Storage;
 
 class Lot extends Model
 {
@@ -20,6 +21,7 @@ class Lot extends Model
         'title',
         'product_type',
         'description',
+        'image_path',
         'auto_delivery_text',
         'price',
         'stock_quantity',
@@ -33,6 +35,15 @@ class Lot extends Model
     public function hasAutoDelivery(): bool
     {
         return filled($this->auto_delivery_text);
+    }
+
+    public function imageUrl(): ?string
+    {
+        if (!filled($this->image_path)) {
+            return null;
+        }
+
+        return Storage::disk('public')->url($this->image_path);
     }
 
     protected function casts(): array
@@ -60,10 +71,17 @@ class Lot extends Model
     }
 
     /**
-     * Фильтрация активных лотов по категории и поисковой строке
+     * Фильтрация активных лотов по категории, поиску, диапазону цен, продавцу и онлайн-статусу
      */
-    public function scopeFilter(Builder $query, ?string $type, ?string $search): Builder
-    {
+    public function scopeFilter(
+        Builder $query,
+        ?string $type = null,
+        ?string $search = null,
+        ?float $minPrice = null,
+        ?float $maxPrice = null,
+        ?string $seller = null,
+        bool $onlineOnly = false
+    ): Builder {
         return $query
             ->where('lots.stock_quantity', '>', 0)
             ->where('lots.status', LotStatus::Active)
@@ -74,14 +92,31 @@ class Lot extends Model
                     $sub->where('lots.title', 'like', $term)
                         ->orWhere('lots.description', 'like', $term);
                 });
+            })
+            ->when($minPrice !== null && $minPrice > 0, fn (Builder $q) => $q->where('lots.price', '>=', $minPrice))
+            ->when($maxPrice !== null && $maxPrice > 0, fn (Builder $q) => $q->where('lots.price', '<=', $maxPrice))
+            ->when($seller, function (Builder $q) use ($seller): void {
+                $cleanSeller = trim($seller);
+                $q->whereHas('seller', function (Builder $sq) use ($cleanSeller): void {
+                    if (is_numeric($cleanSeller)) {
+                        $sq->where('users.id', (int) $cleanSeller);
+                    } else {
+                        $sq->where('users.username', 'like', '%' . $cleanSeller . '%');
+                    }
+                });
+            })
+            ->when($onlineOnly, function (Builder $q): void {
+                $q->whereHas('seller', fn (Builder $sq) => $sq->where('users.last_seen_at', '>=', now()->subMinutes(5)));
             });
     }
 
     /**
-     * Безопасная сортировка по цене, рейтингу продавца или новизне
+     * Безопасная сортировка по цене, рейтингу продавца, онлайн-статусу или новизне
      */
     public function scopeSortBy(Builder $query, ?string $sort): Builder
     {
+        $threshold = now()->subMinutes(5)->toDateTimeString();
+
         return match ($sort) {
             'price_asc' => $query->orderBy('lots.price', 'asc'),
             'price_desc' => $query->orderBy('lots.price', 'desc'),
@@ -89,6 +124,12 @@ class Lot extends Model
                 ->join('users', 'lots.seller_id', '=', 'users.id')
                 ->select('lots.*')
                 ->orderByDesc('users.rating')
+                ->orderByDesc('lots.id'),
+            'online_first' => $query
+                ->join('users', 'lots.seller_id', '=', 'users.id')
+                ->select('lots.*')
+                ->orderByRaw('CASE WHEN users.last_seen_at >= ? THEN 1 ELSE 0 END DESC', [$threshold])
+                ->orderByDesc('users.last_seen_at')
                 ->orderByDesc('lots.id'),
             default => $query->latest('lots.id'),
         };

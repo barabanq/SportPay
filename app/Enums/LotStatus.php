@@ -15,11 +15,11 @@ enum LotStatus: string
     public function label(): string
     {
         return match ($this) {
-            self::Draft => 'Черновик',
-            self::Active => 'Активен',
-            self::Reserved => 'Забронирован',
-            self::Sold => 'Продан',
-            self::Archived => 'В архиве',
+            self::Draft => __('Черновик'),
+            self::Active => __('Активен'),
+            self::Reserved => __('Забронирован'),
+            self::Sold => __('Продан'),
+            self::Archived => __('В архиве'),
         };
     }
 }

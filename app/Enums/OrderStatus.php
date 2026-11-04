@@ -16,12 +16,12 @@ enum OrderStatus: string
     public function label(): string
     {
         return match ($this) {
-            self::Created => 'СОЗДАН',
-            self::Paid => 'В ХОЛДЕ (ОПЛАЧЕН)',
-            self::Shipped => 'ПЕРЕДАН',
-            self::Disputed => 'АРБИТРАЖ (СПОР)',
-            self::Completed => 'ЗАВЕРШЕН',
-            self::Cancelled => 'ОТМЕНЕН (ВОЗВРАТ)',
+            self::Created => __('СОЗДАН'),
+            self::Paid => __('В ХОЛДЕ (ОПЛАЧЕН)'),
+            self::Shipped => __('ПЕРЕДАН'),
+            self::Disputed => __('АРБИТРАЖ (СПОР)'),
+            self::Completed => __('ЗАВЕРШЕН'),
+            self::Cancelled => __('ОТМЕНЕН (ВОЗВРАТ)'),
         };
     }
 

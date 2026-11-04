@@ -1,12 +1,16 @@
 <!DOCTYPE html>
-<html lang="ru" class="dark">
+<html lang="{{ app()->getLocale() }}" class="dark">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>@yield('title', 'SportPay — Биржа спортивных товаров и услуг')</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+    <title>@yield('title', 'SportPay — P2P Sports Marketplace')</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://js.pusher.com/8.2.0/pusher.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/laravel-echo@1.16.1/dist/echo.iife.js"></script>
+    <style>
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
     <script>
     window.Pusher = Pusher;
     window.Echo = new Echo({
@@ -20,97 +24,261 @@
     });
     </script>
 </head>
-<body class="bg-slate-950 text-slate-100 min-h-screen font-sans">
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased">
 
-<header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-30">
-    <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-4">
-        <div class="flex flex-wrap items-center gap-2">
-            <a href="{{ route('home') }}" class="text-2xl font-extrabold tracking-tight text-emerald-400 mr-2">
-                SPORT<span class="text-white">PAY</span>
-            </a>
+<header class="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-40">
+    <div class="max-w-7xl mx-auto px-3 sm:px-4 py-2.5 sm:py-3">
+        <!-- Верхняя полоса шапки (Лого + быстрые контролы на мобилках) -->
+        <div class="flex items-center justify-between gap-2">
+            <div class="flex items-center gap-2 sm:gap-3">
+                <a href="{{ route('home') }}" class="text-xl sm:text-2xl font-extrabold tracking-tight text-emerald-400">
+                    SPORT<span class="text-white">PAY</span>
+                </a>
 
-            <a href="{{ route('home') }}" class="text-xs px-3 py-2 rounded-lg {{ request()->routeIs('home') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
-                Каталог лотов
-            </a>
+                <!-- Переключатель языка RU / EN -->
+                <form action="{{ route('locale.switch') }}" method="POST" class="inline-flex rounded-xl bg-slate-950 p-0.5 border border-slate-800">
+                    @csrf
+                    <button type="submit" name="locale" value="ru" class="px-2 py-1 rounded-lg text-[11px] font-extrabold transition {{ app()->getLocale() === 'ru' ? 'bg-emerald-500 text-slate-950' : 'text-slate-400 hover:text-white' }}">
+                        RU
+                    </button>
+                    <button type="submit" name="locale" value="en" class="px-2 py-1 rounded-lg text-[11px] font-extrabold transition {{ app()->getLocale() === 'en' ? 'bg-emerald-500 text-slate-950' : 'text-slate-400 hover:text-white' }}">
+                        EN
+                    </button>
+                </form>
+            </div>
 
-            <a href="{{ route('chat.index') }}" class="text-xs px-3.5 py-2 rounded-lg {{ request()->routeIs('chat.index') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition flex items-center gap-1.5">
-                <span>💬 Сообщения</span>
-                @if(!empty($unreadMessagesCount))
-                    <span class="px-1.5 py-0.5 text-[10px] font-extrabold rounded-full bg-rose-500 text-white">
-                        +{{ $unreadMessagesCount }}
-                    </span>
+            <!-- Десктопная навигация -->
+            <nav class="hidden lg:flex items-center gap-1.5">
+                <a href="{{ route('home') }}" class="text-xs px-3 py-2 rounded-lg {{ request()->routeIs('home') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
+                    {{ __('Каталог лотов') }}
+                </a>
+
+                <a href="{{ route('chat.index') }}" class="text-xs px-3 py-2 rounded-lg {{ request()->routeIs('chat.index') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition flex items-center gap-1.5">
+                    <span>💬 {{ __('Сообщения') }}</span>
+                    @if(!empty($unreadMessagesCount))
+                        <span class="px-1.5 py-0.5 text-[10px] font-extrabold rounded-full bg-rose-500 text-white">
+                            +{{ $unreadMessagesCount }}
+                        </span>
+                    @endif
+                </a>
+
+                <a href="{{ route('chat.global') }}" class="text-xs px-3 py-2 rounded-lg {{ request()->routeIs('chat.global') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
+                    🌍 {{ __('Общий чат') }}
+                </a>
+
+                <a href="{{ route('wallet.index') }}" class="text-xs px-3 py-2 rounded-lg {{ request()->routeIs('wallet.*') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
+                    💳 {{ __('Финансы') }}
+                </a>
+
+                <a href="{{ route('arbitration.index') }}" class="text-xs px-3 py-2 rounded-lg {{ request()->routeIs('arbitration.*') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition flex items-center gap-1.5">
+                    <span>⚖️ {{ __('Арбитраж') }}</span>
+                    @if(!empty($disputedOrdersCount))
+                        <span class="px-1.5 py-0.5 text-[10px] font-extrabold rounded-full bg-amber-500 text-slate-950">
+                            {{ $disputedOrdersCount }}
+                        </span>
+                    @endif
+                </a>
+
+                <!-- Выпадающее меню «Помощь» -->
+                <div class="relative" id="help-dropdown-container">
+                    <button type="button" id="help-dropdown-btn" class="text-xs px-3 py-2 rounded-lg {{ request()->routeIs('support.*') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition flex items-center gap-1">
+                        <span>{{ __('Помощь') }}</span>
+                        <svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                        </svg>
+                    </button>
+
+                    <div id="help-dropdown-menu" class="hidden absolute left-0 mt-2 w-48 rounded-xl bg-slate-900 border border-slate-700 shadow-2xl py-1.5 z-50 divide-y divide-slate-800/80 text-xs">
+                        <div class="py-1">
+                            <a href="{{ route('support.rules') }}" class="block px-4 py-2 text-slate-200 hover:bg-slate-800 hover:text-emerald-400 transition">
+                                📜 {{ __('Правила') }}
+                            </a>
+                            <a href="{{ route('support.help') }}" class="block px-4 py-2 text-slate-200 hover:bg-slate-800 hover:text-emerald-400 transition">
+                                💡 {{ __('Центр помощи') }}
+                            </a>
+                        </div>
+                        <div class="py-1">
+                            <a href="{{ route('support.tickets.create') }}" class="block px-4 py-2 text-slate-200 hover:bg-slate-800 hover:text-emerald-400 transition">
+                                ✉️ {{ __('Отправить запрос') }}
+                            </a>
+                            <a href="{{ route('support.tickets.index') }}" class="block px-4 py-2 text-slate-200 hover:bg-slate-800 hover:text-emerald-400 transition">
+                                �� {{ __('Мои запросы') }}
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </nav>
+
+            <!-- Правый блок (Баланс + Профиль + Кнопка мобильного меню) -->
+            <div class="flex items-center gap-2">
+                @if(isset($user))
+                    <a href="{{ route('wallet.index') }}" class="bg-slate-800/90 hover:bg-slate-800 px-2.5 sm:px-3.5 py-1.5 rounded-xl border border-slate-700 transition">
+                        <div class="text-[9px] sm:text-[10px] text-slate-400 leading-none">{{ __('Баланс') }}</div>
+                        <div class="font-extrabold text-emerald-400 text-xs mt-0.5">
+                            {{ number_format((float) $user->wallet_balance, 0, '.', ' ') }} ₽
+                        </div>
+                    </a>
+
+                    <a href="{{ route('users.show', $user->id) }}" class="hidden sm:inline-flex text-xs text-slate-200 hover:text-emerald-400 font-bold px-3 py-2 rounded-xl bg-slate-800/80 border border-slate-700 transition">
+                        👤 {{ $user->username }}
+                    </a>
+
+                    <form action="{{ route('logout') }}" method="POST" class="hidden sm:block">
+                        @csrf
+                        <button type="submit" class="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-rose-500/20 border border-slate-700 text-xs text-slate-300 hover:text-rose-300 transition">
+                            {{ __('Выйти') }}
+                        </button>
+                    </form>
+                @else
+                    <a href="{{ route('login') }}" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-white transition">
+                        {{ __('Войти') }}
+                    </a>
                 @endif
-            </a>
 
-            <a href="{{ route('chat.global') }}" class="text-xs px-3.5 py-2 rounded-lg {{ request()->routeIs('chat.global') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
-                🌍 Общий чат
-            </a>
-
-            <a href="{{ route('wallet.index') }}" class="text-xs px-3.5 py-2 rounded-lg {{ request()->routeIs('wallet.*') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
-                💳 Финансы
-            </a>
-
-            <a href="{{ route('arbitration.index') }}" class="text-xs px-3.5 py-2 rounded-lg {{ request()->routeIs('arbitration.*') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition flex items-center gap-1.5">
-                <span>⚖️ Арбитраж</span>
-                @if(!empty($disputedOrdersCount))
-                    <span class="px-1.5 py-0.5 text-[10px] font-extrabold rounded-full bg-amber-500 text-slate-950">
-                        {{ $disputedOrdersCount }}
-                    </span>
+                @if(isset($allUsers) && $allUsers->isNotEmpty())
+                    <form action="{{ route('user.switch') }}" method="POST" class="hidden xl:flex items-center gap-1.5 bg-slate-950/90 px-2.5 py-1.5 rounded-xl border border-slate-800">
+                        @csrf
+                        <label for="switch-user-select" class="text-[10px] text-slate-500 uppercase font-bold">Dev:</label>
+                        <select id="switch-user-select" name="user_id" onchange="this.form.submit()" class="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-[11px] text-slate-200 font-semibold focus:outline-none focus:border-emerald-500 cursor-pointer">
+                            @foreach ($allUsers as $u)
+                                <option value="{{ $u->id }}" @selected(isset($user) && $user->id === $u->id)>
+                                    {{ $u->username }} ({{ number_format((float) $u->wallet_balance, 0, '.', ' ') }} ₽)
+                                </option>
+                            @endforeach
+                        </select>
+                    </form>
                 @endif
-            </a>
+
+                <!-- Бургер-кнопка для телефонов и планшетов -->
+                <button type="button" id="mobile-menu-btn" aria-label="Menu" class="lg:hidden p-2 rounded-xl bg-slate-800 border border-slate-700 text-slate-200 hover:text-emerald-400">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+                    </svg>
+                </button>
+            </div>
         </div>
 
-        <div class="flex items-center gap-3">
-            @if(isset($user))
-                <a href="{{ route('users.show', $user->id) }}" class="text-xs text-slate-300 hover:text-emerald-400 font-bold px-2.5 py-1.5 rounded-lg bg-slate-800/60 border border-slate-800 transition">
-                    👤 {{ $user->username }}
+        <!-- Выпадающее мобильное меню для смартфонов -->
+        <div id="mobile-menu-panel" class="hidden lg:hidden mt-3 pt-3 border-t border-slate-800 space-y-3">
+            <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+                <a href="{{ route('home') }}" class="px-3 py-2.5 rounded-xl {{ request()->routeIs('home') ? 'bg-emerald-500 text-slate-950 font-extrabold' : 'bg-slate-800/80 text-slate-200 font-semibold' }}">
+                    🏪 {{ __('Каталог лотов') }}
                 </a>
-
-                <a href="{{ route('wallet.index') }}" class="bg-slate-800/90 hover:bg-slate-800 px-3.5 py-1.5 rounded-xl border border-slate-700 transition">
-                    <div class="text-[10px] text-slate-400">Баланс кошелька</div>
-                    <div class="font-extrabold text-emerald-400 text-xs">
-                        {{ number_format((float) $user->wallet_balance, 2, '.', ' ') }} ₽
-                    </div>
+                <a href="{{ route('chat.index') }}" class="px-3 py-2.5 rounded-xl {{ request()->routeIs('chat.index') ? 'bg-emerald-500 text-slate-950 font-extrabold' : 'bg-slate-800/80 text-slate-200 font-semibold' }} flex items-center justify-between">
+                    <span>💬 {{ __('Сообщения') }}</span>
+                    @if(!empty($unreadMessagesCount))
+                        <span class="px-1.5 py-0.5 text-[10px] font-extrabold rounded-full bg-rose-500 text-white">+{{ $unreadMessagesCount }}</span>
+                    @endif
                 </a>
-            @endif
+                <a href="{{ route('chat.global') }}" class="px-3 py-2.5 rounded-xl {{ request()->routeIs('chat.global') ? 'bg-emerald-500 text-slate-950 font-extrabold' : 'bg-slate-800/80 text-slate-200 font-semibold' }}">
+                    🌍 {{ __('Общий чат') }}
+                </a>
+                <a href="{{ route('wallet.index') }}" class="px-3 py-2.5 rounded-xl {{ request()->routeIs('wallet.*') ? 'bg-emerald-500 text-slate-950 font-extrabold' : 'bg-slate-800/80 text-slate-200 font-semibold' }}">
+                    💳 {{ __('Финансы') }}
+                </a>
+                <a href="{{ route('arbitration.index') }}" class="px-3 py-2.5 rounded-xl {{ request()->routeIs('arbitration.*') ? 'bg-emerald-500 text-slate-950 font-extrabold' : 'bg-slate-800/80 text-slate-200 font-semibold' }} flex items-center justify-between">
+                    <span>⚖️ {{ __('Арбитраж') }}</span>
+                    @if(!empty($disputedOrdersCount))
+                        <span class="px-1.5 py-0.5 text-[10px] font-extrabold rounded-full bg-amber-500 text-slate-950">{{ $disputedOrdersCount }}</span>
+                    @endif
+                </a>
+                <a href="{{ route('support.help') }}" class="px-3 py-2.5 rounded-xl bg-slate-800/80 text-slate-200 font-semibold">
+                    💡 {{ __('Центр помощи') }}
+                </a>
+                <a href="{{ route('support.rules') }}" class="px-3 py-2.5 rounded-xl bg-slate-800/80 text-slate-200 font-semibold">
+                    📜 {{ __('Правила') }}
+                </a>
+                <a href="{{ route('support.tickets.create') }}" class="px-3 py-2.5 rounded-xl bg-slate-800/80 text-slate-200 font-semibold">
+                    ✉️ {{ __('Отправить запрос') }}
+                </a>
+                <a href="{{ route('support.tickets.index') }}" class="px-3 py-2.5 rounded-xl bg-slate-800/80 text-slate-200 font-semibold">
+                    📂 {{ __('Мои запросы') }}
+                </a>
+            </div>
 
-            @if(isset($allUsers) && $allUsers->isNotEmpty())
-                <form action="{{ route('user.switch') }}" method="POST" class="flex items-center gap-2 bg-slate-800/90 px-3 py-1.5 rounded-xl border border-slate-700">
-                    @csrf
-                    <label for="switch-user-select" class="text-[10px] text-slate-400 uppercase font-bold">Аккаунт:</label>
-                    <select id="switch-user-select" name="user_id" onchange="this.form.submit()" class="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white font-semibold focus:outline-none focus:border-emerald-500 cursor-pointer">
-                        @foreach ($allUsers as $u)
-                            <option value="{{ $u->id }}" @selected(isset($user) && $user->id === $u->id)>
-                                {{ $u->username }} ({{ number_format((float) $u->wallet_balance, 0, '.', ' ') }} ₽)
-                            </option>
-                        @endforeach
-                    </select>
-                </form>
-            @endif
+            <div class="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-800/80">
+                @if(isset($user))
+                    <a href="{{ route('users.show', $user->id) }}" class="text-xs font-bold text-emerald-400">
+                        👤 {{ $user->username }}
+                    </a>
+                @endif
+
+                @if(isset($allUsers) && $allUsers->isNotEmpty())
+                    <form action="{{ route('user.switch') }}" method="POST" class="flex items-center gap-1.5">
+                        @csrf
+                        <span class="text-[10px] text-slate-400 uppercase font-bold">Dev:</span>
+                        <select name="user_id" onchange="this.form.submit()" class="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white font-semibold">
+                            @foreach ($allUsers as $u)
+                                <option value="{{ $u->id }}" @selected(isset($user) && $user->id === $u->id)>
+                                    {{ $u->username }} ({{ number_format((float) $u->wallet_balance, 0, '.', ' ') }} ₽)
+                                </option>
+                            @endforeach
+                        </select>
+                    </form>
+                @endif
+
+                @if(isset($user))
+                    <form action="{{ route('logout') }}" method="POST">
+                        @csrf
+                        <button type="submit" class="px-3 py-1.5 rounded-lg bg-rose-500/15 text-rose-300 text-xs font-bold">
+                            {{ __('Выйти') }}
+                        </button>
+                    </form>
+                @endif
+            </div>
         </div>
     </div>
 </header>
 
-<main class="max-w-7xl mx-auto px-4 py-6 space-y-6">
+<main class="max-w-7xl mx-auto px-3 sm:px-4 py-4 sm:py-6 space-y-5 sm:space-y-6">
     @if(session('success'))
-        <div class="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-sm font-medium">
+        <div class="p-3.5 sm:p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs sm:text-sm font-medium">
             ✓ {{ session('success') }}
         </div>
     @endif
 
     @if(session('error'))
-        <div class="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm font-medium">
+        <div class="p-3.5 sm:p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs sm:text-sm font-medium">
             ✕ {{ session('error') }}
         </div>
     @endif
 
     @if($errors->any())
-        <div class="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-sm">
+        <div class="p-3.5 sm:p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs sm:text-sm">
             {{ $errors->first() }}
         </div>
     @endif
 
     @yield('content')
 </main>
+
+<script>
+(function () {
+    const btn = document.getElementById('help-dropdown-btn');
+    const menu = document.getElementById('help-dropdown-menu');
+    const container = document.getElementById('help-dropdown-container');
+
+    if (btn && menu && container) {
+        btn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            menu.classList.toggle('hidden');
+        });
+
+        document.addEventListener('click', function (e) {
+            if (!container.contains(e.target)) {
+                menu.classList.add('hidden');
+            }
+        });
+    }
+
+    const mobileBtn = document.getElementById('mobile-menu-btn');
+    const mobilePanel = document.getElementById('mobile-menu-panel');
+    if (mobileBtn && mobilePanel) {
+        mobileBtn.addEventListener('click', function () {
+            mobilePanel.classList.toggle('hidden');
+        });
+    }
+})();
+</script>
 </body>
 </html>

@@ -9,6 +9,7 @@ use App\Enums\UserStatus;
 use App\Models\Message;
 use App\Models\Order;
 use App\Models\User;
+use Illuminate\Support\Facades\App;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\View;
@@ -21,6 +22,11 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         View::composer('*', function ($view): void {
+            $locale = session('locale', 'ru');
+            if (in_array($locale, ['ru', 'en'], true)) {
+                App::setLocale($locale);
+            }
+
             if (!Schema::hasTable('users')) {
                 return;
             }
@@ -36,7 +42,7 @@ class AppServiceProvider extends ServiceProvider
                 ]
             );
 
-            if (!Auth::check()) {
+            if (!Auth::check() && !session()->has('logged_out') && !request()->routeIs('login', 'register')) {
                 $defaultUser = User::where('email', 'buyer@sportpay.local')->first() ?? User::first();
                 if ($defaultUser) {
                     Auth::login($defaultUser);
@@ -46,8 +52,16 @@ class AppServiceProvider extends ServiceProvider
             /** @var User|null $user */
             $user = Auth::user();
 
+            if ($user !== null && Schema::hasColumn('users', 'last_seen_at')) {
+                if ($user->last_seen_at === null || $user->last_seen_at->lt(now()->subMinute())) {
+                    $user->timestamps = false;
+                    $user->update(['last_seen_at' => now()]);
+                    $user->timestamps = true;
+                }
+            }
+
             $unreadMessagesCount = 0;
-            if ($user !== null) {
+            if ($user !== null && Schema::hasTable('messages')) {
                 $unreadMessagesCount = Message::query()
                     ->whereNull('read_at')
                     ->where('user_id', '!=', $user->id)
@@ -67,6 +81,7 @@ class AppServiceProvider extends ServiceProvider
                 'allUsers' => User::orderBy('id')->get(),
                 'unreadMessagesCount' => $unreadMessagesCount,
                 'disputedOrdersCount' => $disputedOrdersCount,
+                'currentLocale' => App::getLocale(),
             ]);
         });
     }

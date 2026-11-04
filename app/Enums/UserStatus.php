@@ -14,10 +14,10 @@ enum UserStatus: string
     public function label(): string
     {
         return match ($this) {
-            self::Active => 'Активен',
-            self::Frozen => 'Заморожен',
-            self::Banned => 'Заблокирован',
-            self::Unverified => 'Не верифицирован',
+            self::Active => __('Активен'),
+            self::Frozen => __('Заморожен'),
+            self::Banned => __('Заблокирован'),
+            self::Unverified => __('Не верифицирован'),
         };
     }
 
