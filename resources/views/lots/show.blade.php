@@ -41,6 +41,45 @@
 
             <h1 class="text-xl sm:text-2xl font-extrabold text-white">{{ $lot->title }}</h1>
 
+            @if($lot->location_name || $lot->hasLocation())
+                <div class="p-3.5 rounded-2xl bg-slate-950/90 border border-emerald-500/30 space-y-3">
+                    <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <div class="flex items-center gap-2 text-emerald-300 font-bold">
+                            <span>📍 {{ $lot->location_name ?? __('Точка на карте') }}</span>
+                            @if($lot->hasLocation())
+                                <span class="text-slate-400 font-mono">({{ number_format((float) $lot->latitude, 5) }}, {{ number_format((float) $lot->longitude, 5) }})</span>
+                            @endif
+                        </div>
+                        @if($lot->hasLocation())
+                            <a href="https://yandex.ru/maps/?pt={{ $lot->longitude }},{{ $lot->latitude }}&z=15&l=map"
+                               target="_blank" rel="noopener"
+                               class="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 font-extrabold transition">
+                                {{ __('Открыть в Яндекс.Картах ↗') }}
+                            </a>
+                        @endif
+                    </div>
+
+                    @if($lot->hasLocation())
+                        <div id="lot-show-map" class="w-full h-64 rounded-xl border border-slate-800 z-10"></div>
+                        <script>
+                        document.addEventListener('DOMContentLoaded', function () {
+                            if (typeof L === 'undefined') return;
+                            const lat = {{ (float) $lot->latitude }};
+                            const lng = {{ (float) $lot->longitude }};
+                            const map = L.map('lot-show-map').setView([lat, lng], 14);
+                            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                                maxZoom: 19,
+                                attribution: '© OpenStreetMap'
+                            }).addTo(map);
+                            L.marker([lat, lng]).addTo(map)
+                                .bindPopup(@json($lot->location_name ?? $lot->title))
+                                .openPopup();
+                        });
+                        </script>
+                    @endif
+                </div>
+            @endif
+
             @if($lot->imageUrl())
                 <div class="rounded-2xl overflow-hidden border border-slate-800 bg-slate-950">
                     <img src="{{ $lot->imageUrl() }}" alt="{{ $lot->title }}" class="w-full max-h-96 object-cover">

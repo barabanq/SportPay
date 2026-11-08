@@ -21,21 +21,37 @@ class MarketplaceController extends Controller
     {
         $user = $this->currentUser();
 
-        $minPrice = $request->filled('min_price') ? (float) $request->input('min_price') : null;
-        $maxPrice = $request->filled('max_price') ? (float) $request->input('max_price') : null;
-        $sellerFilter = $request->query('seller');
+        $type = $request->query('type');
+        $search = $request->query('search');
+        $sort = $request->query('sort');
+        $minPrice = $request->filled('min_price') ? (float) $request->query('min_price') : null;
+        $maxPrice = $request->filled('max_price') ? (float) $request->query('max_price') : null;
+        $seller = $request->query('seller');
         $onlineOnly = $request->boolean('online_only');
+
+        $userLat = $request->filled('lat') && is_numeric($request->query('lat'))
+            ? (float) $request->query('lat')
+            : null;
+        $userLng = $request->filled('lng') && is_numeric($request->query('lng'))
+            ? (float) $request->query('lng')
+            : null;
+        $radiusKm = $request->filled('radius_km') && is_numeric($request->query('radius_km'))
+            ? (float) $request->query('radius_km')
+            : null;
 
         $lots = Lot::with('seller')
             ->filter(
-                type: $request->query('type'),
-                search: $request->query('search'),
+                type: $type,
+                search: $search,
                 minPrice: $minPrice,
                 maxPrice: $maxPrice,
-                seller: $sellerFilter,
-                onlineOnly: $onlineOnly
+                seller: $seller,
+                onlineOnly: $onlineOnly,
+                userLat: $userLat,
+                userLng: $userLng,
+                radiusKm: $radiusKm
             )
-            ->sortBy($request->query('sort'))
+            ->sortBy($sort, $userLat, $userLng)
             ->paginate(20)
             ->withQueryString();
 
@@ -47,38 +63,54 @@ class MarketplaceController extends Controller
             ->pluck('total', 'product_type')
             ->all();
 
-        $sellers = User::whereHas('lots', fn ($q) => $q->where('stock_quantity', '>', 0))
-            ->orderBy('username')
-            ->get(['id', 'username', 'rating', 'last_seen_at']);
+        $sellers = User::whereHas('lots', function ($q): void {
+            $q->where('stock_quantity', '>', 0)->where('status', LotStatus::Active);
+        })->orderByDesc('rating')->get();
+
+        $myTransactions = WalletTransaction::with('order.lot')
+            ->where('user_id', $user->id)
+            ->latest('id')
+            ->limit(10)
+            ->get();
+
+        $myPurchases = Order::with(['lot', 'seller'])
+            ->where('buyer_id', $user->id)
+            ->latest('id')
+            ->limit(10)
+            ->get();
+
+        $mySales = Order::with(['lot', 'buyer'])
+            ->where('seller_id', $user->id)
+            ->latest('id')
+            ->limit(10)
+            ->get();
 
         return view('marketplace.index', [
             'user' => $user,
+            'allUsers' => User::orderBy('id')->get(),
             'lots' => $lots,
             'categoryCounts' => $categoryCounts,
             'sellers' => $sellers,
-            'myPurchases' => Order::with(['lot', 'seller'])
-                ->where('buyer_id', $user->id)
-                ->latest()
-                ->get(),
-            'mySales' => Order::with(['lot', 'buyer'])
-                ->where('seller_id', $user->id)
-                ->latest()
-                ->get(),
-            'myTransactions' => WalletTransaction::with('order.lot')
-                ->where('user_id', $user->id)
-                ->latest('id')
-                ->limit(15)
-                ->get(),
+            'myTransactions' => $myTransactions,
+            'myPurchases' => $myPurchases,
+            'mySales' => $mySales,
+            'userLat' => $userLat,
+            'userLng' => $userLng,
+            'radiusKm' => $radiusKm,
         ]);
     }
 
     public function switchUser(Request $request): RedirectResponse
     {
-        $user = User::findOrFail($request->integer('user_id'));
-        $user->update(['last_seen_at' => now()]);
-        Auth::login($user);
+        $data = $request->validate([
+            'user_id' => ['required', 'integer', 'exists:users,id'],
+        ]);
 
-        return redirect()->route('home')->with('success', "Аккаунт: {$user->username}");
+        $targetUser = User::findOrFail((int) $data['user_id']);
+        Auth::login($targetUser);
+        $request->session()->forget('logged_out');
+
+        return back()->with('success', "Вы переключились на аккаунт {$targetUser->username}");
     }
 
     public function switchLocale(Request $request): RedirectResponse
@@ -87,7 +119,7 @@ class MarketplaceController extends Controller
             'locale' => ['required', 'string', 'in:ru,en'],
         ]);
 
-        session(['locale' => $data['locale']]);
+        $request->session()->put('locale', $data['locale']);
         App::setLocale($data['locale']);
 
         return back();

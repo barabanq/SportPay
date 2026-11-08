@@ -11,7 +11,7 @@
         'equipment' => ['label' => __('Экипировка'), 'icon' => '👟', 'count' => $categoryCounts['equipment'] ?? 0],
     ];
     $currentType = (string) request('type', '');
-    $baseFilterParams = request()->only(['search', 'sort', 'min_price', 'max_price', 'seller', 'online_only']);
+    $baseFilterParams = request()->only(['search', 'sort', 'min_price', 'max_price', 'seller', 'online_only', 'lat', 'lng', 'radius_km']);
 @endphp
 
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-5 sm:gap-6">
@@ -51,7 +51,7 @@
             </div>
         </div>
 
-        <!-- Адаптивная панель фильтрации + чекбокс «Только онлайн» + сортировка по онлайн-продавцам -->
+        <!-- Адаптивная панель фильтрации + Гео-поиск PostGIS -->
         <form action="{{ route('home') }}" method="GET" class="p-3 sm:p-3.5 rounded-xl bg-slate-950/70 border border-slate-800/90 space-y-3">
             @if(request('type'))
                 <input type="hidden" name="type" value="{{ request('type') }}">
@@ -60,7 +60,7 @@
             <div class="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
                 <div class="sm:col-span-5">
                     <label class="block text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-1">{{ __('Поиск по лотам') }}</label>
-                    <input type="text" id="lot-search-input" name="search" value="{{ request('search') }}" placeholder="{{ __('Название или описание...') }}" class="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500">
+                    <input type="text" id="lot-search-input" name="search" value="{{ request('search') }}" placeholder="{{ __('Название, описание или город...') }}" class="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500">
                 </div>
 
                 <div class="sm:col-span-4">
@@ -84,12 +84,28 @@
                 </div>
             </div>
 
+            <!-- Строка гео-фильтра PostGIS -->
+            <div class="pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
+                <div class="flex flex-wrap items-center gap-2">
+                    <span class="text-[11px] font-bold text-emerald-400">📍 {{ __('Гео-поиск:') }}</span>
+                    <input type="number" step="any" id="filter_lat" name="lat" value="{{ request('lat') }}" placeholder="{{ __('Широта') }}" class="w-24 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                    <input type="number" step="any" id="filter_lng" name="lng" value="{{ request('lng') }}" placeholder="{{ __('Долгота') }}" class="w-24 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                    <input type="number" step="1" min="1" name="radius_km" value="{{ request('radius_km') }}" placeholder="{{ __('Радиус км') }}" class="w-24 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                </div>
+                <div class="flex flex-wrap items-center gap-1.5 text-[11px]">
+                    <button type="button" onclick="setFilterGeo(55.7558, 37.6173)" class="px-2 py-1 rounded-lg bg-slate-900 border border-slate-800 hover:border-emerald-500/40 text-slate-300">Москва</button>
+                    <button type="button" onclick="setFilterGeo(56.3269, 44.0059)" class="px-2 py-1 rounded-lg bg-slate-900 border border-slate-800 hover:border-emerald-500/40 text-slate-300">Н. Новгород</button>
+                    <button type="button" onclick="detectFilterGeo()" class="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-bold hover:bg-emerald-500/25">Определить по GPS</button>
+                </div>
+            </div>
+
             <div class="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800/80">
                 <div class="flex flex-wrap items-center gap-3 w-full sm:w-auto">
                     <div class="flex items-center gap-2">
                         <span class="text-[11px] text-slate-400 font-semibold shrink-0">{{ __('Сортировка:') }}</span>
                         <select name="sort" onchange="this.form.submit()" class="bg-slate-900 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-200">
                             <option value="latest" @selected(request('sort', 'latest') === 'latest')>{{ __('Сначала новые') }}</option>
+                            <option value="nearest" @selected(request('sort') === 'nearest')>📍 {{ __('Сначала ближайшие ко мне') }}</option>
                             <option value="online_first" @selected(request('sort') === 'online_first')>🟢 {{ __('Сначала продавцы онлайн') }}</option>
                             <option value="price_asc" @selected(request('sort') === 'price_asc')>{{ __('Дешевле (Цена ↑)') }}</option>
                             <option value="price_desc" @selected(request('sort') === 'price_desc')>{{ __('Дороже (Цена ↓)') }}</option>
@@ -105,7 +121,7 @@
                 </div>
 
                 <div class="flex items-center gap-2 w-full sm:w-auto justify-end">
-                    @if(request()->anyFilled(['search', 'type', 'sort', 'min_price', 'max_price', 'seller', 'online_only']))
+                    @if(request()->anyFilled(['search', 'type', 'sort', 'min_price', 'max_price', 'seller', 'online_only', 'lat', 'lng', 'radius_km']))
                         <a href="{{ route('home') }}" class="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-rose-500/20 text-xs text-slate-300 hover:text-rose-300 font-semibold transition">
                             ✕ {{ __('Сбросить') }}
                         </a>
@@ -155,6 +171,18 @@
                                         </span>
                                     @endif
                                 </div>
+                                @if($lot->location_name || $lot->distance_km !== null)
+                                    <div class="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-emerald-300 font-semibold">
+                                        @if($lot->location_name)
+                                            <span>📍 {{ $lot->location_name }}</span>
+                                        @endif
+                                        @if($lot->distance_km !== null)
+                                            <span class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-extrabold">
+                                                {{ $lot->distance_km }} {{ __('км') }}
+                                            </span>
+                                        @endif
+                                    </div>
+                                @endif
                                 <a href="{{ route('lots.show', $lot) }}" class="block text-xs text-slate-400 mt-1 line-clamp-2">
                                     {{ $lot->description ? $lot->description . ' • ' : '' }}{{ __('В наличии:') }} {{ $lot->stock_quantity }} {{ __('шт.') }}
                                 </a>
@@ -242,7 +270,7 @@
                                         </a>
                                     @endif
                                     <div>
-                                        <div class="font-semibold text-white flex items-center gap-1.5">
+                                        <div class="font-semibold text-white flex flex-wrap items-center gap-1.5">
                                             <a href="{{ route('lots.show', $lot) }}" class="hover:text-emerald-400 hover:underline transition">
                                                 {{ $lot->title }}
                                             </a>
@@ -252,6 +280,18 @@
                                                 </span>
                                             @endif
                                         </div>
+                                        @if($lot->location_name || $lot->distance_km !== null)
+                                            <div class="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-emerald-300 font-medium">
+                                                @if($lot->location_name)
+                                                    <span>📍 {{ $lot->location_name }}</span>
+                                                @endif
+                                                @if($lot->distance_km !== null)
+                                                    <span class="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 font-extrabold">
+                                                        {{ $lot->distance_km }} {{ __('км от вас') }}
+                                                    </span>
+                                                @endif
+                                            </div>
+                                        @endif
                                         <a href="{{ route('lots.show', $lot) }}" class="block text-xs text-slate-400 hover:text-slate-300">
                                             {{ $lot->description ? $lot->description . ' • ' : '' }}{{ __('В наличии:') }} {{ $lot->stock_quantity }} {{ __('шт.') }}
                                         </a>
@@ -341,7 +381,7 @@
         @endif
     </div>
 
-    <!-- Правая колонка: Кошелек и Выставление лота с загрузкой фото -->
+    <!-- Правая колонка: Кошелек и Выставление лота с геолокацией -->
     <div class="space-y-5 sm:space-y-6">
         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5">
             <div class="flex items-center justify-between mb-3">
@@ -407,6 +447,38 @@
                     <input type="number" name="price" value="2000" min="50" required placeholder="{{ __('Цена (₽)') }}" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs">
                     <input type="number" name="stock_quantity" value="5" min="1" max="1000" required placeholder="{{ __('Кол-во (шт.)') }}" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs">
                 </div>
+
+                <!-- Блок Геолокации при создании лота -->
+                <div class="p-2.5 rounded-xl bg-slate-950/90 border border-slate-800 space-y-2">
+                    <div class="flex flex-wrap items-center justify-between gap-1">
+                        <span class="text-[11px] text-emerald-400 font-bold">📍 {{ __('Геопозиция (необязательно)') }}</span>
+                        <div class="p-3 rounded-xl bg-slate-950/90 border border-slate-800 space-y-2.5">
+                    <div class="flex flex-wrap items-center justify-between gap-1">
+                        <span class="text-[11px] text-emerald-400 font-bold">📍 {{ __('Геопозиция (кликните по карте или введите цифры)') }}</span>
+                        <div class="flex gap-1 text-[10px]">
+                            <button type="button" onclick="setCreateLotGeo('Москва, Лужники', 55.715765, 37.551521)" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:text-white">МСК</button>
+                            <button type="button" onclick="setCreateLotGeo('Н. Новгород, Мещера', 56.339900, 43.933200)" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:text-white">НН</button>
+                            <button type="button" onclick="detectCreateLotGeo()" class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">GPS</button>
+                            <button type="button" onclick="clearCreateLotGeo()" class="px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300">✕</button>
+                        </div>
+                    </div>
+
+                    <div id="create-lot-map" class="w-full h-44 rounded-xl border border-slate-700 z-10"></div>
+
+                    <input type="text" id="create_location_name" name="location_name" placeholder="{{ __('Название места (определится автоматически или введите свое)...') }}" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                    <div class="grid grid-cols-2 gap-2">
+                        <input type="number" step="any" id="create_lat" name="latitude" placeholder="{{ __('Широта (напр. 55.75)') }}" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                        <input type="number" step="any" id="create_lng" name="longitude" placeholder="{{ __('Долгота (напр. 37.61)') }}" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                    </div>
+                </div>
+                    </div>
+                    <input type="text" id="create_location_name" name="location_name" placeholder="{{ __('Город, зал или стадион...') }}" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                    <div class="grid grid-cols-2 gap-2">
+                        <input type="number" step="any" id="create_lat" name="latitude" placeholder="{{ __('Широта (55.75)') }}" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                        <input type="number" step="any" id="create_lng" name="longitude" placeholder="{{ __('Долгота (37.61)') }}" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white">
+                    </div>
+                </div>
+
                 <div>
                     <label class="block text-[11px] text-slate-400 font-semibold mb-1">📷 {{ __('Фото лота (необязательно)') }}</label>
                     <input type="file" name="image" accept="image/*" class="w-full text-xs text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-slate-800 file:text-emerald-400 hover:file:bg-slate-700 cursor-pointer">
@@ -512,6 +584,136 @@
 </div>
 
 <script>
+function setFilterGeo(lat, lng, defaultRadius = 50) {
+    document.getElementById('filter_lat').value = lat;
+    document.getElementById('filter_lng').value = lng;
+    const radiusInput = document.querySelector('input[name="radius_km"]');
+    if (radiusInput && !radiusInput.value) {
+        radiusInput.value = defaultRadius;
+    }
+}
+
+function detectFilterGeo() {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(function(pos) {
+        setFilterGeo(pos.coords.latitude.toFixed(6), pos.coords.longitude.toFixed(6), 50);
+    });
+}
+
+let createMap = null;
+let createMarker = null;
+let geocodeTimer = null;
+
+async function updateAddressFromCoords(lat, lng, inputId) {
+    const input = document.getElementById(inputId);
+    if (!input) return;
+
+    // Сразу убираем старое застрявшее название пресета, чтобы оно не путало
+    input.value = `${Number(lat).toFixed(4)}, ${Number(lng).toFixed(4)}`;
+
+    try {
+        const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lng)}&zoom=16&accept-language=ru`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && data.address) {
+            const city = data.address.city || data.address.town || data.address.village || data.address.state || '';
+            const place = data.address.stadium || data.address.Fitness_centre || data.address.sports_centre || data.address.road || data.address.suburb || '';
+            const label = [city, place].filter(Boolean).join(', ');
+            if (label) {
+                input.value = label;
+            }
+        }
+    } catch (e) {}
+}
+
+function placeCreateMarker(lat, lng, customName = null) {
+    if (!createMap || typeof L === 'undefined') return;
+    const latNum = parseFloat(lat);
+    const lngNum = parseFloat(lng);
+    if (isNaN(latNum) || isNaN(lngNum)) return;
+
+    if (!createMarker) {
+        createMarker = L.marker([latNum, lngNum], { draggable: true }).addTo(createMap);
+        createMarker.on('dragend', function (e) {
+            const pos = e.target.getLatLng();
+            document.getElementById('create_lat').value = pos.lat.toFixed(6);
+            document.getElementById('create_lng').value = pos.lng.toFixed(6);
+            updateAddressFromCoords(pos.lat, pos.lng, 'create_location_name');
+        });
+    } else {
+        createMarker.setLatLng([latNum, lngNum]);
+    }
+
+    createMap.setView([latNum, lngNum], 13);
+
+    if (customName !== null) {
+        document.getElementById('create_location_name').value = customName;
+    } else {
+        clearTimeout(geocodeTimer);
+        geocodeTimer = setTimeout(() => {
+            updateAddressFromCoords(latNum, lngNum, 'create_location_name');
+        }, 350);
+    }
+}
+
+function setCreateLotGeo(name, lat, lng) {
+    document.getElementById('create_lat').value = lat;
+    document.getElementById('create_lng').value = lng;
+    placeCreateMarker(lat, lng, name);
+}
+
+function clearCreateLotGeo() {
+    document.getElementById('create_location_name').value = '';
+    document.getElementById('create_lat').value = '';
+    document.getElementById('create_lng').value = '';
+    if (createMarker && createMap) {
+        createMap.removeLayer(createMarker);
+        createMarker = null;
+    }
+}
+
+function detectCreateLotGeo() {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition(function(pos) {
+        const lat = pos.coords.latitude.toFixed(6);
+        const lng = pos.coords.longitude.toFixed(6);
+        document.getElementById('create_lat').value = lat;
+        document.getElementById('create_lng').value = lng;
+        placeCreateMarker(lat, lng, null);
+    });
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    const mapContainer = document.getElementById('create-lot-map');
+    if (mapContainer && typeof L !== 'undefined') {
+        createMap = L.map('create-lot-map').setView([55.7558, 37.6173], 5);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap'
+        }).addTo(createMap);
+
+        // Клик мышкой по карте ставит точку и определяет адрес
+        createMap.on('click', function (e) {
+            const lat = e.latlng.lat.toFixed(6);
+            const lng = e.latlng.lng.toFixed(6);
+            document.getElementById('create_lat').value = lat;
+            document.getElementById('create_lng').value = lng;
+            placeCreateMarker(lat, lng, null);
+        });
+    }
+
+    // Когда меняешь цифры руками — двигаем маркер и сразу сбрасываем старое название
+    ['create_lat', 'create_lng'].forEach(id => {
+        document.getElementById(id)?.addEventListener('input', function () {
+            const lat = document.getElementById('create_lat').value;
+            const lng = document.getElementById('create_lng').value;
+            if (lat && lng) {
+                placeCreateMarker(lat, lng, null);
+            }
+        });
+    });
+});
+
 document.getElementById('lot-search-input')?.addEventListener('input', function (e) {
     const term = e.target.value.toLowerCase();
     document.querySelectorAll('.lot-row').forEach(row => {

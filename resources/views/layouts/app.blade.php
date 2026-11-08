@@ -8,6 +8,8 @@
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://js.pusher.com/8.2.0/pusher.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/laravel-echo@1.16.1/dist/echo.iife.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     @php
         $viteReady = file_exists(public_path('hot'));
         if (!$viteReady && file_exists(public_path('build/manifest.json'))) {
