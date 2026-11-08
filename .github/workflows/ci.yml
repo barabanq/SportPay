@@ -54,16 +54,16 @@ jobs:
           CACHE_STORE: array
           QUEUE_CONNECTION: sync
         run: php artisan test --without-tty
-        
-deploy:
+
+  deploy:
     name: Deploy to Production Server
     needs: lint-and-test
-    if: "${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}"
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
 
     steps:
       - name: Trigger Production Deploy via SSH (runs only if secrets are configured)
-        if: "${{ secrets.DEPLOY_HOST != '' }}"
+        if: secrets.DEPLOY_HOST != ''
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.DEPLOY_HOST }}
