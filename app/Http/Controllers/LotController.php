@@ -13,20 +13,28 @@ use Illuminate\Support\Facades\Storage;
 
 class LotController extends Controller
 {
+    private const ALLOWED_TYPES = 'team_game,training_plan,coaching,gym_membership,event_ticket,free_listing,equipment';
+
     public function store(Request $request): RedirectResponse
     {
+        $minPrice = $request->input('product_type') === 'free_listing' ? 0 : 50;
+
         $data = $request->validate([
             'title' => ['required', 'string', 'max:255'],
-            'product_type' => ['required', 'string', 'in:training_plan,coaching,race_slot,equipment,team_game'],
+            'product_type' => ['required', 'string', 'in:' . self::ALLOWED_TYPES],
             'description' => ['nullable', 'string', 'max:2000'],
             'location_name' => ['nullable', 'string', 'max:255'],
             'latitude' => ['nullable', 'numeric', 'between:-90,90'],
             'longitude' => ['nullable', 'numeric', 'between:-180,180'],
             'image' => ['nullable', 'image', 'max:4096'],
             'auto_delivery_text' => ['nullable', 'string', 'max:2000'],
-            'price' => ['required', 'numeric', 'min:50', 'max:1000000'],
+            'price' => ['required', 'numeric', "min:{$minPrice}", 'max:1000000'],
             'stock_quantity' => ['required', 'integer', 'min:1', 'max:1000'],
         ]);
+
+        if ($data['product_type'] === 'free_listing') {
+            $data['price'] = 0;
+        }
 
         unset($data['image']);
 
@@ -43,7 +51,7 @@ class LotController extends Controller
             'status' => LotStatus::Active,
         ]);
 
-        return redirect()->route('home')->with('success', 'Лот успешно опубликован на витрине!');
+        return redirect()->route('home')->with('success', __('Лот успешно опубликован на витрине!'));
     }
 
     public function edit(Lot $lot): View
@@ -60,9 +68,11 @@ class LotController extends Controller
     {
         $this->authorizeAction('update', $lot);
 
+        $minPrice = $request->input('product_type') === 'free_listing' ? 0 : 50;
+
         $data = $request->validate([
             'title' => ['required', 'string', 'max:255'],
-            'product_type' => ['required', 'string', 'in:training_plan,coaching,race_slot,equipment,team_game'],
+            'product_type' => ['required', 'string', 'in:' . self::ALLOWED_TYPES],
             'description' => ['nullable', 'string', 'max:2000'],
             'location_name' => ['nullable', 'string', 'max:255'],
             'latitude' => ['nullable', 'numeric', 'between:-90,90'],
@@ -70,9 +80,13 @@ class LotController extends Controller
             'image' => ['nullable', 'image', 'max:4096'],
             'remove_image' => ['nullable', 'boolean'],
             'auto_delivery_text' => ['nullable', 'string', 'max:2000'],
-            'price' => ['required', 'numeric', 'min:50', 'max:1000000'],
+            'price' => ['required', 'numeric', "min:{$minPrice}", 'max:1000000'],
             'stock_quantity' => ['required', 'integer', 'min:0', 'max:1000'],
         ]);
+
+        if ($data['product_type'] === 'free_listing') {
+            $data['price'] = 0;
+        }
 
         unset($data['image'], $data['remove_image']);
 
@@ -90,7 +104,7 @@ class LotController extends Controller
 
         $lot->update($data);
 
-        return redirect()->route('home')->with('success', 'Лот успешно обновлен!');
+        return redirect()->route('home')->with('success', __('Лот успешно обновлен!'));
     }
 
     public function destroy(Lot $lot): RedirectResponse
@@ -103,7 +117,7 @@ class LotController extends Controller
 
         $lot->delete();
 
-        return redirect()->route('home')->with('success', 'Лот удален.');
+        return redirect()->route('home')->with('success', __('Лот удален.'));
     }
 
     public function show(Lot $lot): View

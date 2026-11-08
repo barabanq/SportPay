@@ -70,3 +70,10 @@ Route::prefix('support')->name('support.')->group(function (): void {
     Route::get('/tickets', [SupportController::class, 'myTickets'])->name('tickets.index');
     Route::post('/tickets/{ticket}/reply', [SupportController::class, 'replyTicket'])->name('tickets.reply');
 });
+
+use App\Http\Controllers\TelegramController;
+
+Route::post('/telegram/connect', [TelegramController::class, 'connect'])->name('telegram.connect');
+Route::post('/telegram/disconnect', [TelegramController::class, 'disconnect'])->name('telegram.disconnect');
+Route::post('/telegram/test', [TelegramController::class, 'sendTest'])->name('telegram.test');
+Route::post('/telegram/webhook', [TelegramController::class, 'webhook'])->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class])->name('telegram.webhook');

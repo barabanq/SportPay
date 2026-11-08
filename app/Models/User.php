@@ -33,6 +33,9 @@ class User extends Authenticatable
     use Notifiable;
 
     protected $fillable = [
+        'telegram_chat_id',
+        'telegram_username',
+        'telegram_link_token',
         'username',
         'email',
         'password',

@@ -2,18 +2,30 @@
 
 @section('content')
 @php
-    $totalActiveLots = array_sum($categoryCounts ?? []);
+    $counts = $categoryCounts ?? [];
+    $teamGameCount = ($counts['team_game'] ?? 0) + ($counts['sports_event'] ?? 0);
     $categories = [
-        '' => ['label' => __('Все категории'), 'icon' => '🔥', 'count' => $totalActiveLots],
-        'team_game' => ['label' => __('Волейбол / Футбол'), 'icon' => '🏐', 'count' => $categoryCounts['team_game'] ?? 0],
-        'training_plan' => ['label' => __('Программы'), 'icon' => '💾', 'count' => $categoryCounts['training_plan'] ?? 0],
-        'coaching' => ['label' => __('Тренерство'), 'icon' => '🏋️', 'count' => $categoryCounts['coaching'] ?? 0],
-        'race_slot' => ['label' => __('Слоты'), 'icon' => '🎟️', 'count' => $categoryCounts['race_slot'] ?? 0],
-        'equipment' => ['label' => __('Экипировка'), 'icon' => '👟', 'count' => $categoryCounts['equipment'] ?? 0],
+        '' => ['label' => __('Все категории'), 'icon' => '🔥', 'count' => array_sum($counts)],
+        'team_game' => ['label' => __('Поиск плюса на командную игру'), 'icon' => '🏐', 'count' => $teamGameCount],
+        'training_plan' => ['label' => __('Программы'), 'icon' => '💾', 'count' => $counts['training_plan'] ?? 0],
+        'coaching' => ['label' => __('Тренерство'), 'icon' => '🏋️', 'count' => $counts['coaching'] ?? 0],
+        'gym_membership' => ['label' => __('Перепродажа абонемента в зал'), 'icon' => '💳', 'count' => $counts['gym_membership'] ?? 0],
+        'event_ticket' => ['label' => __('Билет на спортивное мероприятие'), 'icon' => '🎟️', 'count' => $counts['event_ticket'] ?? 0],
+        'free_listing' => ['label' => __('Бесплатные объявления'), 'icon' => '🎁', 'count' => $counts['free_listing'] ?? 0],
+        'equipment' => ['label' => __('Экипировка'), 'icon' => '��', 'count' => $counts['equipment'] ?? 0],
     ];
     $currentType = (string) request('type', '');
     $baseFilterParams = request()->only(['search', 'sort', 'min_price', 'max_price', 'seller', 'online_only', 'lat', 'lng', 'radius_km']);
 @endphp
+
+<!-- Баннер правил SportPay -->
+<div class="mb-5 p-3.5 sm:p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-start sm:items-center gap-3 text-xs sm:text-sm text-amber-200">
+    <span class="text-lg leading-none shrink-0">🛡️</span>
+    <div>
+        <strong class="font-extrabold text-amber-300">{{ __('Внимание! Правила безопасности SportPay:') }}</strong>
+        <span>{{ __('Вся оплата происходит только внутри SportPay, запрещено переходить в сторонние приложения.') }}</span>
+    </div>
+</div>
 
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-5 sm:gap-6">
     <div class="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-4">
@@ -33,14 +45,14 @@
                 @endif
             </div>
 
-            <div class="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1 -mx-1 px-1">
+            <div class="flex flex-wrap items-center gap-2 pt-1">
                 @foreach ($categories as $typeKey => $cat)
                     @php
                         $isActiveCat = $currentType === $typeKey;
                         $catParams = array_filter(array_merge($baseFilterParams, ['type' => $typeKey ?: null]));
                     @endphp
                     <a href="{{ route('home', $catParams) }}"
-                       class="shrink-0 flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs transition {{ $isActiveCat ? 'bg-gradient-to-r from-emerald-500 to-teal-400 text-slate-950 font-extrabold shadow-lg shadow-emerald-500/25 ring-2 ring-emerald-400/50' : 'bg-slate-950/90 hover:bg-slate-800 text-slate-300 border border-slate-800 hover:border-slate-700 font-semibold' }}">
+                       class="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs transition {{ $isActiveCat ? 'bg-gradient-to-r from-emerald-500 to-teal-400 text-slate-950 font-extrabold shadow-lg shadow-emerald-500/25 ring-2 ring-emerald-400/50' : 'bg-slate-950/90 hover:bg-slate-800 text-slate-300 border border-slate-800 hover:border-slate-700 font-semibold' }}">
                         <span class="text-sm">{{ $cat['icon'] }}</span>
                         <span>{{ $cat['label'] }}</span>
                         <span class="px-1.5 py-0.5 text-[10px] rounded-md {{ $isActiveCat ? 'bg-slate-950/20 text-slate-950 font-black' : 'bg-slate-800 text-slate-400' }}">
@@ -85,15 +97,15 @@
 
             <div class="pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
                 <div class="flex flex-wrap items-center gap-2">
-                    <span class="text-[11px] font-bold text-emerald-400">�� {{ __('Игры рядом:') }}</span>
+                    <span class="text-[11px] font-bold text-emerald-400">📍 {{ __('Игры рядом:') }}</span>
                     <input type="number" step="any" id="filter_lat" name="lat" value="{{ request('lat') }}" placeholder="{{ __('Широта') }}" class="w-24 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white">
                     <input type="number" step="any" id="filter_lng" name="lng" value="{{ request('lng') }}" placeholder="{{ __('Долгота') }}" class="w-24 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white">
                     <input type="number" step="1" min="1" name="radius_km" value="{{ request('radius_km') }}" placeholder="{{ __('Радиус км') }}" class="w-24 bg-slate-900 border border-slate-800 rounded-lg px-2.5 py-1.5 text-xs text-white">
                 </div>
                 <div class="flex flex-wrap items-center gap-1.5 text-[11px]">
-                    <button type="button" onclick="setFilterGeo(55.7558, 37.6173)" class="px-2 py-1 rounded-lg bg-slate-900 border border-slate-800 hover:border-emerald-500/40 text-slate-300">Москва</button>
-                    <button type="button" onclick="setFilterGeo(56.3269, 44.0059)" class="px-2 py-1 rounded-lg bg-slate-900 border border-slate-800 hover:border-emerald-500/40 text-slate-300">Н. Новгород</button>
-                    <button type="button" onclick="detectFilterGeo()" class="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-bold hover:bg-emerald-500/25">Мой GPS</button>
+                    <button type="button" onclick="setFilterGeo(55.7558, 37.6173)" class="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 hover:border-emerald-500/40 text-slate-300">{{ __('Москва') }}</button>
+                    <button type="button" onclick="setFilterGeo(56.3269, 44.0059)" class="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 hover:border-emerald-500/40 text-slate-300">{{ __('Н. Новгород') }}</button>
+                    <button type="button" onclick="detectFilterGeo()" class="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-bold hover:bg-emerald-500/25">{{ __('Мой GPS') }}</button>
                 </div>
             </div>
 
@@ -138,8 +150,10 @@
             @else
                 @foreach ($lots as $lot)
                     @php
-                        $catMeta = $categories[$lot->product_type] ?? ['icon' => '🏅', 'label' => $lot->product_type];
+                        $normalizedType = $lot->product_type === 'sports_event' ? 'team_game' : $lot->product_type;
+                        $catMeta = $categories[$normalizedType] ?? ['icon' => '🏅', 'label' => __($lot->product_type)];
                         $sellerOnline = $lot->seller?->isOnline() ?? false;
+                        $isFreeLot = (float) $lot->price <= 0 || $lot->product_type === 'free_listing';
                     @endphp
                     <div class="lot-row p-3.5 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2.5">
                         <div class="flex items-center justify-between gap-2">
@@ -148,7 +162,7 @@
                                 <span>{{ $catMeta['label'] }}</span>
                             </span>
                             <div class="text-base font-extrabold text-emerald-400">
-                                {{ number_format((float) $lot->price, 0, '.', ' ') }} ₽
+                                {{ $isFreeLot ? __('Бесплатно') : number_format((float) $lot->price, 0, '.', ' ') . ' ₽' }}
                             </div>
                         </div>
 
@@ -213,7 +227,7 @@
                                     @csrf
                                     <input type="number" name="quantity" value="1" min="1" max="{{ $lot->stock_quantity }}" class="w-12 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-white text-center">
                                     <button type="submit" class="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs">
-                                        {{ __('Купить') }}
+                                        {{ $isFreeLot ? __('Забрать') : __('Купить') }}
                                     </button>
                                 </form>
                             @else
@@ -248,8 +262,10 @@
                     @else
                         @foreach ($lots as $lot)
                         @php
-                            $catMeta = $categories[$lot->product_type] ?? ['icon' => '🏅', 'label' => $lot->product_type];
+                            $normalizedType = $lot->product_type === 'sports_event' ? 'team_game' : $lot->product_type;
+                            $catMeta = $categories[$normalizedType] ?? ['icon' => '🏅', 'label' => __($lot->product_type)];
                             $sellerOnline = $lot->seller?->isOnline() ?? false;
+                            $isFreeLot = (float) $lot->price <= 0 || $lot->product_type === 'free_listing';
                         @endphp
                         <tr class="lot-row hover:bg-slate-800/40 transition">
                             <td class="py-3 px-2">
@@ -321,7 +337,9 @@
                                     </div>
                                 </button>
                             </td>
-                            <td class="py-3 px-2 text-right font-bold text-emerald-400">{{ number_format((float) $lot->price, 0, '.', ' ') }} ₽</td>
+                            <td class="py-3 px-2 text-right font-bold text-emerald-400">
+                                {{ $isFreeLot ? __('Бесплатно') : number_format((float) $lot->price, 0, '.', ' ') . ' ₽' }}
+                            </td>
                             <td class="py-3 px-2 text-right">
                                 @if($user && $lot->seller_id !== $user->id)
                                     <div class="flex items-center justify-end gap-1.5">
@@ -329,7 +347,9 @@
                                         <form action="{{ route('lots.purchase', $lot) }}" method="POST" class="flex items-center gap-1">
                                             @csrf
                                             <input type="number" name="quantity" value="1" min="1" max="{{ $lot->stock_quantity }}" class="w-14 bg-slate-950 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white text-center">
-                                            <button type="submit" class="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs">{{ __('Купить') }}</button>
+                                            <button type="submit" class="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs">
+                                                {{ $isFreeLot ? __('Забрать') : __('Купить') }}
+                                            </button>
                                         </form>
                                     </div>
                                 @else
@@ -374,8 +394,69 @@
         @endif
     </div>
 
-    <!-- Правая колонка: Кошелек и Выставление лота с поддержкой локализации -->
+    <!-- Правая колонка: Telegram, Кошелек и Выставление лота -->
     <div class="space-y-5 sm:space-y-6">
+        @if($user)
+            @php
+                $tgService = app(\App\Services\TelegramBotService::class);
+                $tgDeepLink = $user->telegram_chat_id ? null : $tgService->getDeepLink($user);
+                $tgBotUsername = $tgService->resolveBotUsername();
+            @endphp
+            <div class="bg-slate-900 border border-sky-500/30 rounded-2xl p-4 sm:p-5 space-y-3">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <span class="text-base">✈️</span>
+                        <h3 class="text-sm sm:text-base font-bold text-white">{{ __('Telegram-уведомления') }}</h3>
+                    </div>
+                    @if($user->telegram_chat_id)
+                        <span class="px-2 py-0.5 text-[11px] font-bold rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                            🟢 {{ __('Подключен') }}
+                        </span>
+                    @else
+                        <span class="px-2 py-0.5 text-[11px] font-semibold rounded-full bg-slate-800 text-slate-400">
+                            {{ __('Не подключен') }}
+                        </span>
+                    @endif
+                </div>
+
+                @if($user->telegram_chat_id)
+                    <div class="p-2.5 rounded-xl bg-slate-950/80 border border-slate-800 text-xs text-slate-300 flex items-center justify-between">
+                        <span>Chat ID: <b class="text-emerald-400">{{ $user->telegram_chat_id }}</b> {{ $user->telegram_username ? '(@' . $user->telegram_username . ')' : '' }}</span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <form action="{{ route('telegram.test') }}" method="POST" class="flex-1">
+                            @csrf
+                            <button type="submit" class="w-full py-2 rounded-xl bg-sky-500/20 hover:bg-sky-500/30 border border-sky-500/40 text-sky-300 font-bold text-xs transition">
+                                🔔 {{ __('Тест пуша') }}
+                            </button>
+                        </form>
+                        <form action="{{ route('telegram.disconnect') }}" method="POST">
+                            @csrf
+                            <button type="submit" class="px-3 py-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 font-semibold text-xs transition">
+                                {{ __('Отвязать') }}
+                            </button>
+                        </form>
+                    </div>
+                @else
+                    <p class="text-xs text-slate-400">{{ __('Получайте мгновенные пуши о новых сделках, сообщениях в чате и выплатах.') }}</p>
+
+                    <a href="{{ $tgDeepLink }}" target="_blank" rel="noopener" class="block w-full text-center py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-extrabold text-xs transition shadow-lg shadow-sky-500/20">
+                        ✈️ {{ __('Привязать Telegram') }} (@{{ $tgBotUsername }})
+                    </a>
+
+                    <div class="p-2.5 rounded-xl bg-slate-950 border border-slate-800 space-y-1.5 text-xs">
+                        <div class="text-[11px] text-slate-400">{{ __('Или отправьте боту команду:') }}</div>
+                        <div class="flex items-center gap-1.5">
+                            <code id="tg-start-cmd" class="flex-1 p-1.5 rounded bg-slate-900 text-emerald-300 font-mono text-[11px] select-all">/start {{ $user->telegram_link_token }}</code>
+                            <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('tg-start-cmd').innerText); this.innerText='✓';" class="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-[11px]">
+                                Copy
+                            </button>
+                        </div>
+                    </div>
+                @endif
+            </div>
+        @endif
+
         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5">
             <div class="flex items-center justify-between mb-3">
                 <h3 class="text-base font-bold text-white">{{ __('Кошелек') }}</h3>
@@ -426,19 +507,21 @@
         </div>
 
         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5">
-            <h3 class="text-base font-bold text-white mb-3">{{ __('Create a Lot') }}</h3>
+            <h3 class="text-base font-bold text-white mb-3">{{ __('Выставить лот / Собрать игру') }}</h3>
             <form id="create-lot-form" action="{{ route('lots.store') }}" method="POST" enctype="multipart/form-data" class="space-y-3 text-sm">
                 @csrf
-                <input type="text" name="title" required placeholder="{{ __('Напр: Волейбол 6х6 сегодня в 19:00...') }}" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white">
+                <input type="text" name="title" required placeholder="{{ __('Напр: Ищем +1 на волейбол сегодня в 19:00...') }}" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white">
                 <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    <select name="product_type" class="bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-2 text-white text-xs">
-                        <option value="team_game">🏐 {{ __('Волейбол / Футбол') }}</option>
+                    <select id="create_product_type" name="product_type" onchange="toggleFreeListingPrice(this.value)" class="sm:col-span-3 bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-2 text-white text-xs">
+                        <option value="team_game">🏐 {{ __('Поиск плюса на командную игру') }}</option>
                         <option value="training_plan">💾 {{ __('Программа') }}</option>
                         <option value="coaching">🏋️ {{ __('Тренерство') }}</option>
-                        <option value="race_slot">🎟️ {{ __('Слот на забег') }}</option>
+                        <option value="gym_membership">💳 {{ __('Перепродажа абонемента в зал') }}</option>
+                        <option value="event_ticket">🎟️ {{ __('Билет на спортивное мероприятие') }}</option>
+                        <option value="free_listing">🎁 {{ __('Бесплатное объявление') }}</option>
                         <option value="equipment">👟 {{ __('Экипировка') }}</option>
                     </select>
-                    <input type="number" name="price" value="500" min="50" required placeholder="{{ __('Цена (₽)') }}" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs">
+                    <input type="number" id="create_price_input" name="price" value="500" min="0" required placeholder="{{ __('Цена (₽)') }}" class="sm:col-span-2 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs">
                     <input type="number" name="stock_quantity" value="12" min="1" max="1000" required placeholder="{{ __('Мест (шт.)') }}" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs">
                 </div>
 
@@ -446,8 +529,8 @@
                     <div class="flex flex-wrap items-center justify-between gap-1">
                         <span class="text-[11px] text-emerald-400 font-bold">📍 {{ __('Адрес площадки (введите текст или кликните по карте)') }}</span>
                         <div class="flex gap-1 text-[10px]">
-                            <button type="button" onclick="setCreateLotGeo('Москва, СК Лужники', 55.715765, 37.551521)" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:text-white">МСК</button>
-                            <button type="button" onclick="setCreateLotGeo('Нижний Новгород, ФОК Мещерский', 56.339900, 43.933200)" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:text-white">НН</button>
+                            <button type="button" onclick="setCreateLotGeo('Москва, СК Лужники', 55.715765, 37.551521)" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:text-white">{{ __('МСК') }}</button>
+                            <button type="button" onclick="setCreateLotGeo('Нижний Новгород, ФОК Мещерский', 56.339900, 43.933200)" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:text-white">{{ __('НН') }}</button>
                             <button type="button" onclick="detectCreateLotGeo()" class="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">GPS</button>
                         </div>
                     </div>
@@ -473,52 +556,30 @@
                 </div>
                 <textarea name="description" rows="2" placeholder="{{ __('Уровень игроков, покрытие, душ/раздевалка (необязательно)...') }}" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white"></textarea>
                 <textarea name="auto_delivery_text" rows="2" placeholder="{{ __('⚡ Код от входа / ссылка на чат игроков после оплаты (необязательно)...') }}" class="w-full bg-slate-950 border border-emerald-500/40 rounded-lg px-3 py-2 text-xs text-emerald-300 placeholder-slate-500"></textarea>
+                <div class="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-300">
+                    🛡️ {{ __('Вся оплата происходит только внутри SportPay, запрещено переходить в сторонние приложения.') }}
+                </div>
                 <button type="submit" class="w-full py-2.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white font-bold text-xs transition">{{ __('Опубликовать') }}</button>
             </form>
         </div>
     </div>
 </div>
 
-<div class="grid grid-cols-1 lg:grid-cols-2 gap-5 sm:gap-6">
-    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5">
-        <h3 class="text-base font-bold text-white mb-3">{{ __('Мои покупки / Записи на игры') }}</h3>
-        <div class="space-y-3">
-            @foreach ($myPurchases as $order)
-                <div class="p-3.5 rounded-xl bg-slate-800/60 border border-slate-700/70 flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                        <a href="{{ route('orders.show', $order) }}" class="font-bold text-emerald-400 hover:underline text-sm">
-                            {{ __('Заказ') }} #{{ $order->id }}: {{ $order->lot->title ?? 'Лот' }} ({{ $order->quantity }} {{ __('шт.') }})
-                        </a>
-                        @if($order->lot?->location_name)
-                            <div class="text-[11px] text-emerald-300 font-semibold">📍 {{ $order->lot->location_name }}</div>
-                        @endif
-                        <div class="text-xs text-slate-400">{{ __('Продавец:') }} {{ $order->seller->username ?? '-' }} • {{ number_format((float) $order->total_price, 0, '.', ' ') }} ₽</div>
-                    </div>
-                    <a href="{{ route('orders.show', $order) }}" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs text-white font-semibold">💬 {{ __('Чат и карта') }}</a>
-                </div>
-            @endforeach
-        </div>
-    </div>
-
-    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5">
-        <h3 class="text-base font-bold text-white mb-3">{{ __('Мои продажи') }}</h3>
-        <div class="space-y-3">
-            @foreach ($mySales as $order)
-                <div class="p-3.5 rounded-xl bg-slate-800/60 border border-slate-700/70 flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                        <a href="{{ route('orders.show', $order) }}" class="font-bold text-emerald-400 hover:underline text-sm">
-                            {{ __('Заказ') }} #{{ $order->id }}: {{ $order->lot->title ?? 'Лот' }} ({{ $order->quantity }} {{ __('шт.') }})
-                        </a>
-                        <div class="text-xs text-slate-400">{{ __('Покупатель:') }} {{ $order->buyer->username ?? '-' }} • +{{ number_format((float) $order->total_price, 0, '.', ' ') }} ₽</div>
-                    </div>
-                    <a href="{{ route('orders.show', $order) }}" class="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs text-white font-semibold">💬 {{ __('Чат сделки') }}</a>
-                </div>
-            @endforeach
-        </div>
-    </div>
-</div>
-
 <script>
+function toggleFreeListingPrice(type) {
+    const priceInput = document.getElementById('create_price_input');
+    if (!priceInput) return;
+    if (type === 'free_listing') {
+        priceInput.value = 0;
+        priceInput.readOnly = true;
+        priceInput.classList.add('opacity-60');
+    } else {
+        if (Number(priceInput.value) === 0) priceInput.value = 500;
+        priceInput.readOnly = false;
+        priceInput.classList.remove('opacity-60');
+    }
+}
+
 function setFilterGeo(lat, lng, defaultRadius = 30) {
     document.getElementById('filter_lat').value = lat;
     document.getElementById('filter_lng').value = lng;
