@@ -13,7 +13,6 @@
 </div>
 
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-5 sm:gap-6">
-    <!-- Левая колонка: Детали сделки и управление эскроу -->
     <div class="space-y-5 sm:space-y-6">
         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4">
             <div class="flex items-center justify-between">
@@ -31,6 +30,43 @@
                     {{ __('Количество:') }} {{ $order->quantity }} {{ __('шт.') }}
                 </div>
             </div>
+
+            @if($order->lot && ($order->lot->location_name || $order->lot->hasLocation()))
+                <div class="p-3.5 rounded-xl bg-slate-950 border border-emerald-500/30 space-y-2.5">
+                    <div class="text-[11px] uppercase tracking-wider text-emerald-400 font-extrabold">
+                        📍 {{ __('Место встречи / проведения игры') }}
+                    </div>
+                    @if($order->lot->location_name)
+                        <div class="text-xs font-bold text-white">{{ $order->lot->location_name }}</div>
+                    @endif
+                    @if($order->lot->hasLocation())
+                        <div class="text-[11px] text-slate-400 font-mono">
+                            {{ number_format((float) $order->lot->latitude, 5) }}, {{ number_format((float) $order->lot->longitude, 5) }}
+                        </div>
+                        <div id="order-location-map" class="w-full h-44 rounded-lg border border-slate-800 z-10"></div>
+                        <a href="https://yandex.ru/maps/?pt={{ $order->lot->longitude }},{{ $order->lot->latitude }}&z=16&l=map"
+                           target="_blank" rel="noopener"
+                           class="block w-full py-2 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-center text-xs font-bold text-emerald-300 transition">
+                            {{ __('Построить маршрут в Яндекс.Картах ↗') }}
+                        </a>
+                        <script>
+                        document.addEventListener('DOMContentLoaded', function () {
+                            if (typeof L === 'undefined') return;
+                            const lat = {{ (float) $order->lot->latitude }};
+                            const lng = {{ (float) $order->lot->longitude }};
+                            const map = L.map('order-location-map').setView([lat, lng], 15);
+                            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                                maxZoom: 19,
+                                attribution: '© OpenStreetMap'
+                            }).addTo(map);
+                            L.marker([lat, lng]).addTo(map)
+                                .bindPopup(@json($order->lot->location_name ?? $order->lot->title))
+                                .openPopup();
+                        });
+                        </script>
+                    @endif
+                </div>
+            @endif
 
             <div class="p-3.5 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between">
                 <span class="text-xs text-slate-400">{{ __('Сумма в эскроу') }}</span>
@@ -55,7 +91,6 @@
             </div>
         </div>
 
-        <!-- Подтверждение заказа покупателем -->
         @if($order->buyer_id === $user->id && $order->status->isConfirmable())
             <div class="bg-slate-900 border border-emerald-500/30 rounded-2xl p-4 sm:p-6 space-y-4">
                 <h2 class="text-sm font-extrabold uppercase tracking-wider text-emerald-400">
@@ -87,7 +122,6 @@
             </div>
         @endif
 
-        <!-- Возврат средств продавцом -->
         @if(($order->seller_id === $user->id || $user->isArbiter()) && $order->status->isConfirmable())
             <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3">
                 <h3 class="text-xs font-extrabold uppercase tracking-wider text-slate-300">{{ __('Управление продавца') }}</h3>
@@ -100,7 +134,6 @@
             </div>
         @endif
 
-        <!-- Открытие арбитражного спора -->
         @if(($order->buyer_id === $user->id || $order->seller_id === $user->id) && $order->status->isDisputable())
             <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 space-y-3">
                 <h3 class="text-xs font-extrabold uppercase tracking-wider text-amber-400">{{ __('Проблема со сделкой?') }}</h3>
@@ -114,7 +147,6 @@
             </div>
         @endif
 
-        <!-- Панель решения спора для Арбитра -->
         @if($user->isArbiter() && $order->status === \App\Enums\OrderStatus::Disputed)
             <div class="bg-slate-900 border border-rose-500/40 rounded-2xl p-4 sm:p-5 space-y-3">
                 <h3 class="text-xs font-extrabold uppercase tracking-wider text-rose-300">{{ __('⚖️ Решение Арбитра SportPay') }}</h3>
@@ -134,7 +166,6 @@
         @endif
     </div>
 
-    <!-- Правая колонка: Чат по сделке (адаптивная высота на смартфонах) -->
     <div class="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl flex flex-col justify-between h-[65vh] sm:h-[74vh] overflow-hidden">
         <div class="p-3.5 sm:p-4 border-b border-slate-800 flex items-center justify-between bg-slate-900/60">
             <div>

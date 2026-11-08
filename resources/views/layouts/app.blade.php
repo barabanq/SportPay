@@ -8,8 +8,105 @@
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://js.pusher.com/8.2.0/pusher.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/laravel-echo@1.16.1/dist/echo.iife.js"></script>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" />
+    <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+    <script>
+    // Адаптер интерактивных карт на базе нейтрального движка MapLibre GL JS (без Leaflet)
+    window.L = {
+        map: function (containerId) {
+            const instance = {
+                _map: null,
+                _clickHandlers: [],
+                setView: function (coords, zoom) {
+                    const lat = Number(coords[0]) || 55.7558;
+                    const lng = Number(coords[1]) || 37.6173;
+                    const z = Math.max(2, (Number(zoom) || 13) - 1);
+                    if (!this._map) {
+                        this._map = new maplibregl.Map({
+                            container: containerId,
+                            style: {
+                                version: 8,
+                                sources: {
+                                    osm: {
+                                        type: 'raster',
+                                        tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+                                        tileSize: 256,
+                                        attribution: 'SportPay Maps'
+                                    }
+                                },
+                                layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
+                            },
+                            center: [lng, lat],
+                            zoom: z,
+                            attributionControl: false
+                        });
+                        this._map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+                        this._map.on('click', (e) => {
+                            this._clickHandlers.forEach(fn => fn({ latlng: { lat: e.lngLat.lat, lng: e.lngLat.lng } }));
+                        });
+                    } else {
+                        this._map.JumpTo ? this._map.jumpTo({ center: [lng, lat], zoom: z }) : this._map.setCenter([lng, lat]);
+                    }
+                    return this;
+                },
+                on: function (event, handler) {
+                    if (event === 'click') this._clickHandlers.push(handler);
+                    return this;
+                },
+                removeLayer: function (markerWrapper) {
+                    if (markerWrapper && markerWrapper._mlMarker) markerWrapper._mlMarker.remove();
+                }
+            };
+            return instance;
+        },
+        tileLayer: function () {
+            return { addTo: function () { return this; } };
+        },
+        marker: function (coords, options = {}) {
+            let lat = Number(coords[0]) || 55.7558;
+            let lng = Number(coords[1]) || 37.6173;
+            const mlMarker = new maplibregl.Marker({
+                color: '#10b981',
+                draggable: Boolean(options.draggable)
+            }).setLngLat([lng, lat]);
+
+            return {
+                _mlMarker: mlMarker,
+                addTo: function (mapWrapper) {
+                    if (mapWrapper && mapWrapper._map) {
+                        mlMarker.addTo(mapWrapper._map);
+                    }
+                    return this;
+                },
+                setLatLng: function (newCoords) {
+                    const nLat = Array.isArray(newCoords) ? Number(newCoords[0]) : Number(newCoords.lat);
+                    const nLng = Array.isArray(newCoords) ? Number(newCoords[1]) : Number(newCoords.lng);
+                    mlMarker.setLngLat([nLng, nLat]);
+                    return this;
+                },
+                on: function (event, fn) {
+                    if (event === 'dragend') {
+                        mlMarker.on('dragend', () => {
+                            const pos = mlMarker.getLngLat();
+                            fn({ target: { getLatLng: () => ({ lat: pos.lat, lng: pos.lng }) } });
+                        });
+                    }
+                    return this;
+                },
+                bindPopup: function (text) {
+                    const popup = new maplibregl.Popup({ offset: 25 }).setText(String(text || ''));
+                    mlMarker.setPopup(popup);
+                    return this;
+                },
+                openPopup: function () {
+                    const popup = mlMarker.getPopup();
+                    if (popup && !popup.isOpen()) mlMarker.togglePopup();
+                    return this;
+                }
+            };
+        }
+    };
+    </script>
     @php
         $viteReady = file_exists(public_path('hot'));
         if (!$viteReady && file_exists(public_path('build/manifest.json'))) {
@@ -24,6 +121,8 @@
         [v-cloak] { display: none; }
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .maplibregl-popup-content { background: #0f172a !important; color: #f8fafc !important; border: 1px solid #334155; border-radius: 0.75rem !important; padding: 8px 12px !important; font-size: 12px; font-weight: 700; }
+        .maplibregl-popup-tip { border-top-color: #0f172a !important; }
     </style>
     <script>
     window.Pusher = Pusher;
@@ -40,11 +139,9 @@
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased">
 
-<!-- Реактивная шапка на Vue 3 (работает всегда: и с Vite, и через встроенный Vue 3 инстанс) -->
 <header id="sportpay-header-vue" class="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-40">
     <div class="max-w-7xl mx-auto px-3 sm:px-4 py-2.5 sm:py-3">
         <div class="flex items-center justify-between gap-2">
-            <!-- Лого + Переключатель RU / EN -->
             <div class="flex items-center gap-2 sm:gap-3">
                 <a href="{{ route('home') }}" class="text-xl sm:text-2xl font-extrabold tracking-tight text-emerald-400 flex items-center gap-1.5">
                     <span>SPORT<span class="text-white">PAY</span></span>
@@ -62,7 +159,6 @@
                 </form>
             </div>
 
-            <!-- Десктопное меню -->
             <nav class="hidden lg:flex items-center gap-1.5">
                 <a href="{{ route('home') }}" class="text-xs px-3 py-2 rounded-lg {{ request()->routeIs('home') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition">
                     {{ __('Каталог лотов') }}
@@ -94,7 +190,6 @@
                     @endif
                 </a>
 
-                <!-- Выпадающее меню «Помощь» под управлением Vue 3 -->
                 <div class="relative">
                     <button type="button" @click.stop="helpOpen = !helpOpen" class="text-xs px-3 py-2 rounded-lg {{ request()->routeIs('support.*') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition flex items-center gap-1">
                         <span>{{ __('Помощь') }}</span>
@@ -124,7 +219,6 @@
                 </div>
             </nav>
 
-            <!-- Правая панель: Баланс, Профиль, Dev-переключатель и Мобильный бургер -->
             <div class="flex items-center gap-2">
                 @if(isset($user))
                     <a href="{{ route('wallet.index') }}" class="bg-slate-800/90 hover:bg-slate-800 px-2.5 sm:px-3.5 py-1.5 rounded-xl border border-slate-700 transition">
@@ -172,7 +266,6 @@
             </div>
         </div>
 
-        <!-- Выпадающее мобильное меню под управлением Vue 3 -->
         <div v-cloak v-show="mobileOpen" class="lg:hidden mt-3 pt-3 border-t border-slate-800 space-y-3">
             <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
                 <a href="{{ route('home') }}" class="px-3 py-2.5 rounded-xl {{ request()->routeIs('home') ? 'bg-emerald-500 text-slate-950 font-extrabold' : 'bg-slate-800/80 text-slate-200 font-semibold' }}">

@@ -17,7 +17,7 @@ class LotController extends Controller
     {
         $data = $request->validate([
             'title' => ['required', 'string', 'max:255'],
-            'product_type' => ['required', 'string', 'in:training_plan,coaching,race_slot,equipment'],
+            'product_type' => ['required', 'string', 'in:training_plan,coaching,race_slot,equipment,team_game'],
             'description' => ['nullable', 'string', 'max:2000'],
             'location_name' => ['nullable', 'string', 'max:255'],
             'latitude' => ['nullable', 'numeric', 'between:-90,90'],
@@ -62,7 +62,7 @@ class LotController extends Controller
 
         $data = $request->validate([
             'title' => ['required', 'string', 'max:255'],
-            'product_type' => ['required', 'string', 'in:training_plan,coaching,race_slot,equipment'],
+            'product_type' => ['required', 'string', 'in:training_plan,coaching,race_slot,equipment,team_game'],
             'description' => ['nullable', 'string', 'max:2000'],
             'location_name' => ['nullable', 'string', 'max:255'],
             'latitude' => ['nullable', 'numeric', 'between:-90,90'],

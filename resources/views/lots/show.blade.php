@@ -5,12 +5,16 @@
 @section('content')
 @php
     $typeLabels = [
+        'team_game' => __('🏐 Командная игра (Волейбол / Футбол)'),
         'training_plan' => __('Программа тренировок'),
         'coaching' => __('Тренерство / Коучинг'),
         'race_slot' => __('Слот на соревнование'),
         'equipment' => __('Спортивная экипировка'),
     ];
     $sellerOnline = $lot->seller?->isOnline() ?? false;
+    $yandexMapUrl = $lot->hasLocation()
+        ? "https://yandex.ru/maps/?pt={$lot->longitude},{$lot->latitude}&z=16&l=map"
+        : "https://yandex.ru/maps/?text=" . urlencode((string) $lot->location_name);
 @endphp
 
 <div class="mb-2">
@@ -20,7 +24,6 @@
 </div>
 
 <div class="grid grid-cols-1 lg:grid-cols-3 gap-5 sm:gap-6">
-    <!-- Левая колонка: Фото, Информация о лоте и отзывы -->
     <div class="lg:col-span-2 space-y-5 sm:space-y-6">
         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4 sm:space-y-5">
             <div class="flex flex-wrap items-center justify-between gap-2">
@@ -45,38 +48,66 @@
                 <div class="p-3.5 rounded-2xl bg-slate-950/90 border border-emerald-500/30 space-y-3">
                     <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
                         <div class="flex items-center gap-2 text-emerald-300 font-bold">
-                            <span>📍 {{ $lot->location_name ?? __('Точка на карте') }}</span>
-                            @if($lot->hasLocation())
-                                <span class="text-slate-400 font-mono">({{ number_format((float) $lot->latitude, 5) }}, {{ number_format((float) $lot->longitude, 5) }})</span>
-                            @endif
+                            <span>📍 <span id="lot-show-address-label">{{ $lot->location_name ?: __('Точка проведения на карте') }}</span></span>
+                            <span id="lot-show-coords-label" class="text-slate-400 font-mono">
+                                @if($lot->hasLocation())
+                                    ({{ number_format((float) $lot->latitude, 5) }}, {{ number_format((float) $lot->longitude, 5) }})
+                                @endif
+                            </span>
                         </div>
-                        @if($lot->hasLocation())
-                            <a href="https://yandex.ru/maps/?pt={{ $lot->longitude }},{{ $lot->latitude }}&z=15&l=map"
-                               target="_blank" rel="noopener"
-                               class="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 font-extrabold transition">
-                                {{ __('Открыть в Яндекс.Картах ↗') }}
-                            </a>
-                        @endif
+                        <a id="lot-show-yandex-link"
+                           href="{{ $yandexMapUrl }}"
+                           target="_blank" rel="noopener"
+                           class="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 font-extrabold transition">
+                            {{ __('Открыть в Яндекс.Картах ↗') }}
+                        </a>
                     </div>
 
-                    @if($lot->hasLocation())
-                        <div id="lot-show-map" class="w-full h-64 rounded-xl border border-slate-800 z-10"></div>
-                        <script>
-                        document.addEventListener('DOMContentLoaded', function () {
-                            if (typeof L === 'undefined') return;
-                            const lat = {{ (float) $lot->latitude }};
-                            const lng = {{ (float) $lot->longitude }};
-                            const map = L.map('lot-show-map').setView([lat, lng], 14);
-                            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                                maxZoom: 19,
-                                attribution: '© OpenStreetMap'
-                            }).addTo(map);
-                            L.marker([lat, lng]).addTo(map)
-                                .bindPopup(@json($lot->location_name ?? $lot->title))
+                    <div id="lot-show-map" class="w-full h-64 rounded-xl border border-slate-800 z-10"></div>
+                    <script>
+                    document.addEventListener('DOMContentLoaded', async function () {
+                        if (typeof L === 'undefined') return;
+                        let lat = {{ $lot->hasLocation() ? (float) $lot->latitude : 'null' }};
+                        let lng = {{ $lot->hasLocation() ? (float) $lot->longitude : 'null' }};
+                        const locName = @json($lot->location_name ?? $lot->title);
+
+                        if ((lat === null || lng === null) && locName) {
+                            try {
+                                const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(locName)}&limit=1&accept-language=ru`);
+                                const data = await res.json();
+                                if (Array.isArray(data) && data.length > 0) {
+                                    lat = parseFloat(data[0].lat);
+                                    lng = parseFloat(data[0].lon);
+                                    const coordsEl = document.getElementById('lot-show-coords-label');
+                                    if (coordsEl) coordsEl.textContent = `(${lat.toFixed(5)}, ${lng.toFixed(5)})`;
+                                    const yandexEl = document.getElementById('lot-show-yandex-link');
+                                    if (yandexEl) yandexEl.href = `https://yandex.ru/maps/?pt=${lng},${lat}&z=16&l=map`;
+                                }
+                            } catch (e) {}
+                        }
+
+                        if (lat === null || lng === null) {
+                            lat = 55.7558;
+                            lng = 37.6173;
+                        }
+
+                        const map = L.map('lot-show-map').setView([lat, lng], 15);
+                        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                            maxZoom: 19,
+                            attribution: '© OpenStreetMap'
+                        }).addTo(map);
+
+                        const marker = L.marker([lat, lng]).addTo(map)
+                            .bindPopup(locName)
+                            .openPopup();
+
+                        map.on('click', function (e) {
+                            marker.setLatLng(e.latlng)
+                                .bindPopup(`${locName} (${e.latlng.lat.toFixed(5)}, ${e.latlng.lng.toFixed(5)})`)
                                 .openPopup();
                         });
-                        </script>
-                    @endif
+                    });
+                    </script>
                 </div>
             @endif
 
@@ -112,7 +143,6 @@
             </div>
         </div>
 
-        <!-- Отзывы по этому лоту -->
         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4">
             <h2 class="text-base font-extrabold text-white">
                 {{ __('Отзывы покупателей по лоту') }} ({{ $lot->reviews->count() }})
@@ -141,12 +171,11 @@
         </div>
     </div>
 
-    <!-- Правая колонка: Покупка и карточка продавца с аватаром и онлайн-статусом -->
     <div class="space-y-5 sm:space-y-6">
         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-5">
             <div class="flex items-baseline justify-between">
                 <div>
-                    <div class="text-xs text-slate-400 uppercase font-bold">{{ __('Цена за 1 шт.') }}</div>
+                    <div class="text-xs text-slate-400 uppercase font-bold">{{ __('Цена за 1 место / шт.') }}</div>
                     <div class="text-2xl sm:text-3xl font-extrabold text-emerald-400 mt-1">
                         {{ number_format((float) $lot->price, 0, '.', ' ') }} ₽
                     </div>
@@ -163,7 +192,7 @@
                         @csrf
                         <div>
                             <label for="purchase-qty" class="block text-xs text-slate-400 font-semibold mb-1.5">
-                                {{ __('Выберите количество') }} (1 — {{ $lot->stock_quantity }} {{ __('шт.') }})
+                                {{ __('Выберите количество мест / шт.') }} (1 — {{ $lot->stock_quantity }} {{ __('шт.') }})
                             </label>
                             <div class="flex items-center justify-between gap-3">
                                 <input
@@ -191,7 +220,7 @@
                     </p>
                 @else
                     <div class="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-center text-xs text-rose-300 font-bold">
-                        {{ __('Товар временно закончился') }}
+                        {{ __('Места закончились') }}
                     </div>
                 @endif
             @else
@@ -214,7 +243,7 @@
         @if($lot->seller)
         <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-4">
             <div class="flex items-center justify-between">
-                <div class="text-xs text-slate-400 uppercase font-bold">{{ __('Продавец') }}</div>
+                <div class="text-xs text-slate-400 uppercase font-bold">{{ __('Организатор / Продавец') }}</div>
                 <span class="text-[11px] font-bold px-2 py-0.5 rounded-full {{ $sellerOnline ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-slate-800 text-slate-400' }}">
                     {{ $sellerOnline ? '🟢 ' . __('Онлайн') : '⚪ ' . __('Офлайн') }}
                 </span>

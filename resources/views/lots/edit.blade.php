@@ -4,8 +4,6 @@
 
 @section('content')
 <!-- Подключаем стили и скрипты Leaflet карты -->
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
 <div class="max-w-2xl mx-auto bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 space-y-6">
     <div class="flex items-center justify-between border-b border-slate-800 pb-4">
