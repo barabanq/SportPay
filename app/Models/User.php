@@ -33,6 +33,11 @@ class User extends Authenticatable
     use Notifiable;
 
     protected $fillable = [
+        'tg_notify_messages',
+        'tg_subscribed_categories',
+        'tg_radar_lat',
+        'tg_radar_lng',
+        'tg_radar_radius_km',
         'telegram_chat_id',
         'telegram_username',
         'telegram_link_token',
@@ -55,6 +60,11 @@ class User extends Authenticatable
     protected function casts(): array
     {
         return [
+            'tg_notify_messages' => 'boolean',
+            'tg_subscribed_categories' => 'array',
+            'tg_radar_lat' => 'float',
+            'tg_radar_lng' => 'float',
+            'tg_radar_radius_km' => 'integer',
             'password' => 'hashed',
             'wallet_balance' => 'decimal:2',
             'rating' => 'decimal:2',

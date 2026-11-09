@@ -51,6 +51,10 @@ class ChatController extends Controller
                 ->update(['read_at' => now()]);
         }
 
+        if (isset($activePartner) && $activePartner) {
+            app(\App\Services\TelegramBotService::class)->clearChatCooldown($user->id, (int) $activePartner->id);
+        }
+
         return view('chat.index', [
             'user' => $user,
             'allUsers' => User::orderBy('id')->get(),
@@ -107,6 +111,8 @@ class ChatController extends Controller
             'body' => $data['body'],
             'is_system' => false,
         ]);
+
+        app(\App\Services\TelegramBotService::class)->notifyDirectMessage($recipient, $sender, (string) $data['body']);
 
         $message->load('user');
         $order->touch();

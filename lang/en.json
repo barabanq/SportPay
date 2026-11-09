@@ -338,5 +338,11 @@
     "Отвязать": "Disconnect",
     "Ссылка для привязки Telegram сгенерирована! Нажмите «Открыть бота» или отправьте команду боту.": "Telegram link generated! Click Open Bot or send the command to the bot.",
     "Telegram-бот успешно отвязан от аккаунта.": "Telegram bot successfully disconnected.",
-    "Тестовое уведомление отправлено в ваш Telegram!": "Test notification sent to your Telegram!"
+    "Тестовое уведомление отправлено в ваш Telegram!": "Test notification sent to your Telegram!",
+    "Уведомлять о личных сообщениях и покупках": "Notify about direct messages and purchases",
+    "Радар новых лотов по разделам:": "New lots radar by category:",
+    "Гео-фильтр радара (необязательно):": "Radar geo-filter (optional):",
+    "Оставьте пустым, чтобы получать лоты из всех городов": "Leave empty to receive lots from all cities",
+    "Сохранить настройки пушей": "Save Push Settings",
+    "Настройки Telegram-уведомлений и радара сохранены!": "Telegram notification and radar settings saved!"
 }

@@ -45,11 +45,13 @@ class LotController extends Controller
         $seller = $this->currentUser();
         $seller->update(['last_seen_at' => now()]);
 
-        Lot::create([
+        $lot = Lot::create([
             ...$data,
             'seller_id' => $seller->id,
             'status' => LotStatus::Active,
         ]);
+
+        app(\App\Services\TelegramBotService::class)->notifySubscribersAboutNewLot($lot);
 
         return redirect()->route('home')->with('success', __('Лот успешно опубликован на витрине!'));
     }

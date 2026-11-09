@@ -32,6 +32,11 @@ class OrderController extends Controller
 
         $order->load(['lot', 'buyer', 'seller', 'messages.user', 'review']);
 
+        $partnerId = $user->id === $order->buyer_id ? $order->seller_id : $order->buyer_id;
+        if ($partnerId) {
+            app(\App\Services\TelegramBotService::class)->clearChatCooldown($user->id, (int) $partnerId);
+        }
+
         return view('orders.show', [
             'user' => $user,
             'order' => $order,
@@ -53,7 +58,9 @@ class OrderController extends Controller
                 quantity: $quantity
             );
 
-            return redirect()
+            
+            app(\App\Services\TelegramBotService::class)->notifyOrderCreated($order);
+return redirect()
                 ->route('orders.show', $order)
                 ->with('success', "Сделка #{$order->id} успешно создана! Средства зарезервированы в эскроу.");
         } catch (DomainException $e) {

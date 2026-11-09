@@ -77,3 +77,5 @@ Route::post('/telegram/connect', [TelegramController::class, 'connect'])->name('
 Route::post('/telegram/disconnect', [TelegramController::class, 'disconnect'])->name('telegram.disconnect');
 Route::post('/telegram/test', [TelegramController::class, 'sendTest'])->name('telegram.test');
 Route::post('/telegram/webhook', [TelegramController::class, 'webhook'])->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class])->name('telegram.webhook');
+
+Route::post('/telegram/preferences', [\App\Http\Controllers\TelegramController::class, 'updatePreferences'])->name('telegram.preferences');

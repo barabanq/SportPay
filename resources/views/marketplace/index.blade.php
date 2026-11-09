@@ -420,9 +420,63 @@
                 </div>
 
                 @if($user->telegram_chat_id)
+                    @php
+                        $userSubs = is_array($user->tg_subscribed_categories) ? $user->tg_subscribed_categories : [];
+                        $radarCategories = [
+                            'team_game' => '🏐 ' . __('Поиск плюса на командную игру'),
+                            'training_plan' => '💾 ' . __('Программы'),
+                            'coaching' => '🏋️ ' . __('Тренерство'),
+                            'gym_membership' => '💳 ' . __('Перепродажа абонемента в зал'),
+                            'event_ticket' => '🎟️ ' . __('Билет на спортивное мероприятие'),
+                            'free_listing' => '🎁 ' . __('Бесплатные объявления'),
+                            'equipment' => '👟 ' . __('Экипировка'),
+                        ];
+                    @endphp
                     <div class="p-2.5 rounded-xl bg-slate-950/80 border border-slate-800 text-xs text-slate-300 flex items-center justify-between">
                         <span>Chat ID: <b class="text-emerald-400">{{ $user->telegram_chat_id }}</b> {{ $user->telegram_username ? '(@' . $user->telegram_username . ')' : '' }}</span>
                     </div>
+
+                    <form action="{{ route('telegram.preferences') }}" method="POST" class="p-3 rounded-xl bg-slate-950/90 border border-slate-800 space-y-3 text-xs">
+                        @csrf
+                        <label class="flex items-center gap-2 cursor-pointer font-semibold text-slate-200">
+                            <input type="checkbox" name="tg_notify_messages" value="1" @checked($user->tg_notify_messages ?? true) class="rounded bg-slate-900 border-slate-700 text-emerald-500 focus:ring-0">
+                            <span>💬 {{ __('Уведомлять о личных сообщениях и покупках') }}</span>
+                        </label>
+
+                        <div class="space-y-1.5 pt-2 border-t border-slate-800/80">
+                            <div class="text-[11px] font-bold text-sky-400">📡 {{ __('Радар новых лотов по разделам:') }}</div>
+                            <div class="grid grid-cols-1 gap-1.5 max-h-40 overflow-y-auto pr-1">
+                                @foreach($radarCategories as $catKey => $catTitle)
+                                    <label class="flex items-center gap-2 px-2 py-1 rounded-lg bg-slate-900/90 border border-slate-800/80 hover:border-sky-500/40 cursor-pointer text-[11px] text-slate-300">
+                                        <input type="checkbox" name="categories[]" value="{{ $catKey }}" @checked(in_array($catKey, $userSubs, true)) class="rounded bg-slate-950 border-slate-700 text-sky-500 focus:ring-0">
+                                        <span class="truncate">{{ $catTitle }}</span>
+                                    </label>
+                                @endforeach
+                            </div>
+                        </div>
+
+                        <div class="space-y-1.5 pt-2 border-t border-slate-800/80">
+                            <div class="flex items-center justify-between">
+                                <span class="text-[11px] font-bold text-emerald-400">📍 {{ __('Гео-фильтр радара (необязательно):') }}</span>
+                                <div class="flex gap-1 text-[10px]">
+                                    <button type="button" onclick="setRadarGeo(55.7558, 37.6173, 30)" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:text-white">{{ __('МСК') }}</button>
+                                    <button type="button" onclick="setRadarGeo(56.3269, 44.0059, 30)" class="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 hover:text-white">{{ __('НН') }}</button>
+                                    <button type="button" onclick="setRadarGeo('', '', '')" class="px-1.5 py-0.5 rounded bg-slate-800 text-rose-300">✕</button>
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-3 gap-1.5">
+                                <input type="number" step="any" id="tg_radar_lat" name="tg_radar_lat" value="{{ $user->tg_radar_lat }}" placeholder="{{ __('Широта') }}" class="w-full bg-slate-900 border border-slate-800 rounded-lg px-2 py-1 text-[11px] text-white">
+                                <input type="number" step="any" id="tg_radar_lng" name="tg_radar_lng" value="{{ $user->tg_radar_lng }}" placeholder="{{ __('Долгота') }}" class="w-full bg-slate-900 border border-slate-800 rounded-lg px-2 py-1 text-[11px] text-white">
+                                <input type="number" step="1" min="1" id="tg_radar_radius_km" name="tg_radar_radius_km" value="{{ $user->tg_radar_radius_km }}" placeholder="{{ __('Радиус км') }}" class="w-full bg-slate-900 border border-slate-800 rounded-lg px-2 py-1 text-[11px] text-white">
+                            </div>
+                            <div class="text-[10px] text-slate-500">{{ __('Оставьте пустым, чтобы получать лоты из всех городов') }}</div>
+                        </div>
+
+                        <button type="submit" class="w-full py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-xs transition">
+                            💾 {{ __('Сохранить настройки пушей') }}
+                        </button>
+                    </form>
+
                     <div class="flex items-center gap-2">
                         <form action="{{ route('telegram.test') }}" method="POST" class="flex-1">
                             @csrf
@@ -578,6 +632,12 @@ function toggleFreeListingPrice(type) {
         priceInput.readOnly = false;
         priceInput.classList.remove('opacity-60');
     }
+}
+
+function setRadarGeo(lat, lng, radius) {
+    document.getElementById('tg_radar_lat').value = lat;
+    document.getElementById('tg_radar_lng').value = lng;
+    document.getElementById('tg_radar_radius_km').value = radius;
 }
 
 function setFilterGeo(lat, lng, defaultRadius = 30) {
