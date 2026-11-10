@@ -334,5 +334,144 @@ if (window.Vue && document.getElementById('sportpay-header-vue')) {
     }).mount('#sportpay-header-vue');
 }
 </script>
+<!-- SPORTPAY_SOUND_ENGINE_START -->
+<div id="sportpay-live-toast" class="fixed bottom-5 right-5 z-50 hidden max-w-sm p-4 rounded-2xl bg-slate-900/95 border border-emerald-500/50 shadow-2xl text-xs text-white space-y-1.5">
+    <div class="flex items-center justify-between gap-3">
+        <span id="sportpay-toast-title" class="font-extrabold text-emerald-400">🔔 SportPay</span>
+        <button type="button" onclick="document.getElementById('sportpay-live-toast').classList.add('hidden')" class="text-slate-400 hover:text-white">✕</button>
+    </div>
+    <div id="sportpay-toast-body" class="text-slate-200 leading-relaxed"></div>
+    <a id="sportpay-toast-link" href="#" class="inline-block pt-1 text-emerald-400 font-bold hover:underline">Открыть →</a>
+</div>
+
+<script>
+(function () {
+    let audioCtx = null;
+
+    function getAudioCtx() {
+        if (!audioCtx) {
+            const Ctx = window.AudioContext || window.webkitAudioContext;
+            if (Ctx) audioCtx = new Ctx();
+        }
+        if (audioCtx && audioCtx.state === 'suspended') {
+            audioCtx.resume().catch(() => {});
+        }
+        return audioCtx;
+    }
+
+    document.addEventListener('click', () => getAudioCtx(), { once: true });
+
+    function playNote(freq, delay, duration, type = 'sine', peak = 0.16) {
+        const ctx = getAudioCtx();
+        if (!ctx) return;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, ctx.currentTime + delay);
+
+        gain.gain.setValueAtTime(0.0001, ctx.currentTime + delay);
+        gain.gain.exponentialRampToValueAtTime(peak, ctx.currentTime + delay + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + delay + duration);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(ctx.currentTime + delay);
+        osc.stop(ctx.currentTime + delay + duration + 0.02);
+    }
+
+    window.SportPaySound = {
+        playMessage: function () {
+            try {
+                playNote(659.25, 0.00, 0.14, 'sine', 0.15); // E5
+                playNote(880.00, 0.12, 0.22, 'sine', 0.18); // A5
+            } catch (e) {}
+        },
+        playPurchase: function () {
+            try {
+                playNote(523.25, 0.00, 0.11, 'triangle', 0.18); // C5
+                playNote(659.25, 0.10, 0.11, 'triangle', 0.18); // E5
+                playNote(783.99, 0.20, 0.13, 'triangle', 0.20); // G5
+                playNote(1046.50, 0.32, 0.28, 'triangle', 0.22); // C6
+            } catch (e) {}
+        }
+    };
+
+    function showToast(title, body, link) {
+        const toast = document.getElementById('sportpay-live-toast');
+        if (!toast) return;
+        document.getElementById('sportpay-toast-title').textContent = title;
+        document.getElementById('sportpay-toast-body').textContent = body;
+        document.getElementById('sportpay-toast-link').href = link || '#';
+        toast.classList.remove('hidden');
+        setTimeout(() => toast.classList.add('hidden'), 7000);
+    }
+
+    // Звук при создании/оплате заказа
+    document.addEventListener('DOMContentLoaded', function () {
+        const pageText = document.body.innerText || '';
+        if (window.location.pathname.startsWith('/orders/') && (pageText.includes('зарезервированы') || pageText.includes('оплачена') || pageText.includes('escrow'))) {
+            if (!sessionStorage.getItem('sp_played_order_' + window.location.pathname)) {
+                sessionStorage.setItem('sp_played_order_' + window.location.pathname, '1');
+                setTimeout(() => window.SportPaySound.playPurchase(), 250);
+            }
+        }
+    });
+
+    setInterval(async function () {
+        try {
+            const box = document.getElementById('chat-messages-box');
+            const partnerId = box ? (box.dataset.partnerId || '') : '';
+            const afterId = box ? (box.dataset.lastId || '0') : '0';
+
+            const res = await fetch(`/messages/poll?partner_id=${encodeURIComponent(partnerId)}&after_id=${encodeURIComponent(afterId)}`, {
+                headers: { 'Accept': 'application/json' }
+            });
+            if (!res.ok) return;
+            const data = await res.json();
+
+            if (Array.isArray(data.chat_messages) && data.chat_messages.length > 0 && window.appendLiveChatMessages) {
+                const hasIncoming = data.chat_messages.some(m => !m.is_mine);
+                window.appendLiveChatMessages(data.chat_messages);
+                if (hasIncoming) window.SportPaySound.playMessage();
+            }
+
+            if (data.latest_incoming_message && data.latest_incoming_message.id) {
+                const msgId = String(data.latest_incoming_message.id);
+                const prevMsg = sessionStorage.getItem('sp_last_msg_id');
+                if (prevMsg === null) {
+                    sessionStorage.setItem('sp_last_msg_id', msgId);
+                } else if (Number(msgId) > Number(prevMsg)) {
+                    sessionStorage.setItem('sp_last_msg_id', msgId);
+                    if (!box) {
+                        window.SportPaySound.playMessage();
+                        showToast(
+                            '💬 Сообщение от ' + data.latest_incoming_message.sender_name,
+                            data.latest_incoming_message.body,
+                            '/messages?partner=' + data.latest_incoming_message.partner_id
+                        );
+                    }
+                }
+            }
+
+            if (data.latest_seller_order && data.latest_seller_order.id) {
+                const ordId = String(data.latest_seller_order.id);
+                const prevOrd = sessionStorage.getItem('sp_last_ord_id');
+                if (prevOrd === null) {
+                    sessionStorage.setItem('sp_last_ord_id', ordId);
+                } else if (Number(ordId) > Number(prevOrd)) {
+                    sessionStorage.setItem('sp_last_ord_id', ordId);
+                    window.SportPaySound.playPurchase();
+                    showToast(
+                        '💰 Новая покупка лота!',
+                        `${data.latest_seller_order.buyer} купил «${data.latest_seller_order.title}» (Заказ #${ordId})`,
+                        '/orders/' + ordId
+                    );
+                }
+            }
+        } catch (e) {}
+    }, 4000);
+})();
+</script>
+<!-- SPORTPAY_SOUND_ENGINE_END -->
 </body>
 </html>

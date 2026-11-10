@@ -344,5 +344,13 @@
     "Гео-фильтр радара (необязательно):": "Radar geo-filter (optional):",
     "Оставьте пустым, чтобы получать лоты из всех городов": "Leave empty to receive lots from all cities",
     "Сохранить настройки пушей": "Save Push Settings",
-    "Настройки Telegram-уведомлений и радара сохранены!": "Telegram notification and radar settings saved!"
+    "Настройки Telegram-уведомлений и радара сохранены!": "Telegram notification and radar settings saved!",
+    "Звук сообщения": "Message Sound",
+    "Звук покупки": "Purchase Sound",
+    "Собеседники": "Contacts",
+    "У вас пока нет активных диалогов по сделкам.": "You have no active order conversations yet.",
+    "Сообщений по сделкам с этим пользователем пока нет.": "No order messages with this user yet.",
+    "Напишите сообщение по сделке...": "Write an order message...",
+    "Чат открывается автоматически после оформления заказа по любому лоту продавца.": "Chat opens automatically after placing an order on any seller lot.",
+    "Выберите собеседника слева.": "Select a contact on the left."
 }

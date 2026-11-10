@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
-use App\Events\OrderMessageSent;
 use App\Models\Message;
 use App\Models\Order;
 use App\Models\User;
@@ -18,88 +17,75 @@ class ChatController extends Controller
     public function index(Request $request): View
     {
         $user = $this->currentUser();
+        $user->update(['last_seen_at' => now()]);
 
-        $orders = Order::with(['lot', 'buyer', 'seller', 'latestMessage'])
-            ->where(function ($query) use ($user): void {
-                $query->where('buyer_id', $user->id)
-                    ->orWhere('seller_id', $user->id);
-            })
-            ->withCount([
-                'messages as unread_count' => function ($query) use ($user): void {
-                    $query->where('user_id', '!=', $user->id)->whereNull('read_at');
-                },
-            ])
-            ->latest('updated_at')
+        $myOrders = Order::with(['lot', 'buyer', 'seller'])
+            ->where('buyer_id', $user->id)
+            ->orWhere('seller_id', $user->id)
+            ->latest('id')
             ->get();
 
-        $activeOrder = null;
+        $partnerIds = $myOrders->map(function (Order $order) use ($user) {
+            return (int) $order->buyer_id === (int) $user->id
+                ? (int) $order->seller_id
+                : (int) $order->buyer_id;
+        })->unique()->reject(fn (int $id) => $id === (int) $user->id)->values();
 
-        if ($request->filled('order_id')) {
-            $activeOrder = Order::with(['lot', 'buyer', 'seller', 'messages.user'])
-                    ->findOrFail((int) $request->integer('order_id'));
-
-            $this->authorizeAction('view', $activeOrder);
-        } elseif ($orders->isNotEmpty()) {
-            $activeOrder = Order::with(['lot', 'buyer', 'seller', 'messages.user'])
-                    ->find($orders->first()->id);
+        $requestedPartnerId = (int) ($request->query('partner') ?: $request->query('user') ?: 0);
+        if ($requestedPartnerId > 0 && $requestedPartnerId !== (int) $user->id && !$partnerIds->contains($requestedPartnerId)) {
+            $partnerIds->prepend($requestedPartnerId);
         }
 
-        if ($activeOrder !== null) {
-            Message::where('order_id', $activeOrder->id)
-                ->where('user_id', '!=', $user->id)
-                ->whereNull('read_at')
-                ->update(['read_at' => now()]);
+        $partnersMap = User::whereIn('id', $partnerIds)->get()->keyBy('id');
+        $partners = $partnerIds->map(fn (int $id) => $partnersMap->get($id))->filter()->values();
+
+        $activePartner = null;
+        if ($requestedPartnerId > 0 && $partnersMap->has($requestedPartnerId)) {
+            $activePartner = $partnersMap->get($requestedPartnerId);
+        } elseif ($partners->isNotEmpty()) {
+            $activePartner = $partners->first();
         }
 
-        if (isset($activePartner) && $activePartner) {
-            app(\App\Services\TelegramBotService::class)->clearChatCooldown($user->id, (int) $activePartner->id);
+        $sharedOrders = collect();
+        $messages = collect();
+
+        if ($activePartner) {
+            $sharedOrders = Order::with('lot')
+                ->where(function ($q) use ($user, $activePartner) {
+                    $q->where('buyer_id', $user->id)->where('seller_id', $activePartner->id);
+                })
+                ->orWhere(function ($q) use ($user, $activePartner) {
+                    $q->where('buyer_id', $activePartner->id)->where('seller_id', $user->id);
+                })
+                ->latest('id')
+                ->get();
+
+            if ($sharedOrders->isNotEmpty()) {
+                $messages = Message::with(['user', 'order.lot'])
+                    ->whereIn('order_id', $sharedOrders->pluck('id'))
+                    ->orderBy('id')
+                    ->get();
+            }
         }
 
         return view('chat.index', [
             'user' => $user,
-            'allUsers' => User::orderBy('id')->get(),
-            'orders' => $orders,
-            'activeOrder' => $activeOrder,
+            'partners' => $partners,
+            'activePartner' => $activePartner,
+            'sharedOrders' => $sharedOrders,
+            'messages' => $messages,
         ]);
     }
 
-    public function messages(Request $request, Order$order): JsonResponse
+    /**
+     * Отправка сообщения внутри конкретной сделки (маршрут orders.messages.store)
+     */
+    public function store(Request $request, Order $order): RedirectResponse|JsonResponse
     {
-        $user = $this->currentUser();
         $this->authorizeAction('view', $order);
 
-        $afterId = (int)$request->query('after_id', 0);
-
-        $messages = Message::with('user')
-            ->where('order_id', $order->id)
-            ->where('id', '>', $afterId)
-            ->oldest('id')
-            ->get();
-
-        if ($messages->isNotEmpty()) {
-            Message::where('order_id', $order->id)
-                ->where('user_id', '!=', $user->id)
-                ->whereNull('read_at')
-                ->update(['read_at' => now()]);
-        }
-
-        return response()->json([
-            'messages' => $messages->map(fn (Message$msg): array => [
-                'id' => $msg->id,
-                'order_id' => $msg->order_id,
-                'user_id' => $msg->user_id,
-                'username' => $msg->user->username ?? 'Система',
-                'body' => $msg->body,
-                'is_system' => (bool) $msg->is_system,
-                'time' => $msg->created_at?->format('H:i') ?? now()->format('H:i'),
-            ]),
-        ]);
-    }
-
-    public function store(Request $request, Order$order): JsonResponse|RedirectResponse
-    {
         $user = $this->currentUser();
-        $this->authorizeAction('sendMessage', $order);
+        $user->update(['last_seen_at' => now()]);
 
         $data = $request->validate([
             'body' => ['required', 'string', 'max:2000'],
@@ -108,38 +94,162 @@ class ChatController extends Controller
         $message = Message::create([
             'order_id' => $order->id,
             'user_id' => $user->id,
-            'body' => $data['body'],
+            'body' => trim((string) $data['body']),
             'is_system' => false,
         ]);
 
-        app(\App\Services\TelegramBotService::class)->notifyDirectMessage($recipient, $sender, (string) $data['body']);
-
-        $message->load('user');
-        $order->touch();
-
-        try {
-            broadcast(new OrderMessageSent($message))->toOthers();
-        } catch (\Throwable) {
-            // Игнорируем ошибку сокета, если Reverb не запущен — отработает фоновый пуллинг
-        }
-
-        $payload = [
-            'id' => $message->id,
-            'order_id' => $order->id,
-            'user_id' => $user->id,
-            'username' => $user->username,
-            'body' => $message->body,
-            'is_system' => false,
-            'time' => $message->created_at?->format('H:i') ?? now()->format('H:i'),
-        ];
-
         if ($request->wantsJson()) {
             return response()->json([
-                'status' => 'success',
-                'message' => $payload,
+                'ok' => true,
+                'message' => [
+                    'id' => $message->id,
+                    'order_id' => $order->id,
+                    'sender_name' => $user->username,
+                    'body' => $message->body,
+                    'is_mine' => true,
+                    'is_system' => false,
+                    'time' => $message->created_at?->format('H:i') ?? now()->format('H:i'),
+                ],
             ]);
         }
 
-        return back();
+        return redirect()->back()->with('success', __('Сообщение отправлено!'));
+    }
+
+    /**
+     * Отправка сообщения со страницы /messages (маршрут chat.send)
+     */
+    public function send(Request $request): RedirectResponse|JsonResponse
+    {
+        $user = $this->currentUser();
+        $user->update(['last_seen_at' => now()]);
+
+        $data = $request->validate([
+            'order_id' => ['nullable', 'integer', 'exists:orders,id'],
+            'partner_id' => ['nullable', 'integer', 'exists:users,id'],
+            'body' => ['required', 'string', 'max:2000'],
+        ]);
+
+        $order = null;
+        if (!empty($data['order_id'])) {
+            $order = Order::findOrFail((int) $data['order_id']);
+        } elseif (!empty($data['partner_id'])) {
+            $partnerId = (int) $data['partner_id'];
+            $order = Order::where(function ($q) use ($user, $partnerId) {
+                $q->where('buyer_id', $user->id)->where('seller_id', $partnerId);
+            })->orWhere(function ($q) use ($user, $partnerId) {
+                $q->where('buyer_id', $partnerId)->where('seller_id', $user->id);
+            })->latest('id')->first();
+        }
+
+        if (!$order) {
+            return redirect()->back()->withErrors([
+                'body' => __('Чтобы начать диалог, выберите или оформите сделку с этим пользователем.'),
+            ]);
+        }
+
+        $this->authorizeAction('view', $order);
+
+        $message = Message::create([
+            'order_id' => $order->id,
+            'user_id' => $user->id,
+            'body' => trim((string) $data['body']),
+            'is_system' => false,
+        ]);
+
+        $partnerId = (int) $order->buyer_id === (int) $user->id
+            ? (int) $order->seller_id
+            : (int) $order->buyer_id;
+
+        if ($request->wantsJson()) {
+            return response()->json([
+                'ok' => true,
+                'message' => [
+                    'id' => $message->id,
+                    'order_id' => $order->id,
+                    'sender_name' => $user->username,
+                    'body' => $message->body,
+                    'is_mine' => true,
+                    'is_system' => false,
+                    'time' => $message->created_at?->format('H:i') ?? now()->format('H:i'),
+                ],
+            ]);
+        }
+
+        return redirect()->route('chat.index', ['partner' => $partnerId]);
+    }
+
+    /**
+     * Легкий JSON-поллинг для звуковых уведомлений и автоподгрузки чата
+     */
+    public function poll(Request $request): JsonResponse
+    {
+        $user = $this->currentUser();
+        $partnerId = (int) $request->query('partner_id', 0);
+        $afterId = (int) $request->query('after_id', 0);
+
+        $myOrderIds = Order::where('buyer_id', $user->id)
+            ->orWhere('seller_id', $user->id)
+            ->pluck('id');
+
+        $latestIncomingMessage = null;
+        if ($myOrderIds->isNotEmpty()) {
+            $latestIncomingMessage = Message::with(['user', 'order'])
+                ->whereIn('order_id', $myOrderIds)
+                ->where('user_id', '!=', $user->id)
+                ->latest('id')
+                ->first();
+        }
+
+        $latestSellerOrder = Order::with(['lot', 'buyer'])
+            ->where('seller_id', $user->id)
+            ->latest('id')
+            ->first();
+
+        $chatMessages = [];
+        if ($partnerId > 0) {
+            $sharedOrderIds = Order::where(function ($q) use ($user, $partnerId) {
+                $q->where('buyer_id', $user->id)->where('seller_id', $partnerId);
+            })->orWhere(function ($q) use ($user, $partnerId) {
+                $q->where('buyer_id', $partnerId)->where('seller_id', $user->id);
+            })->pluck('id');
+
+            if ($sharedOrderIds->isNotEmpty()) {
+                $query = Message::with('user')
+                    ->whereIn('order_id', $sharedOrderIds)
+                    ->orderBy('id');
+
+                if ($afterId > 0) {
+                    $query->where('id', '>', $afterId);
+                }
+
+                $chatMessages = $query->get()->map(fn (Message $m) => [
+                    'id' => $m->id,
+                    'order_id' => $m->order_id,
+                    'sender_name' => $m->is_system ? '⚡ SportPay' : ($m->user?->username ?? 'User'),
+                    'body' => $m->body,
+                    'is_mine' => (int) $m->user_id === (int) $user->id,
+                    'is_system' => (bool) $m->is_system,
+                    'time' => $m->created_at?->format('H:i') ?? '',
+                ])->values()->all();
+            }
+        }
+
+        return response()->json([
+            'ok' => true,
+            'latest_incoming_message' => $latestIncomingMessage ? [
+                'id' => $latestIncomingMessage->id,
+                'sender_name' => $latestIncomingMessage->user?->username ?? 'SportPay',
+                'body' => $latestIncomingMessage->body,
+                'partner_id' => $latestIncomingMessage->user_id,
+                'order_id' => $latestIncomingMessage->order_id,
+            ] : null,
+            'latest_seller_order' => $latestSellerOrder ? [
+                'id' => $latestSellerOrder->id,
+                'title' => $latestSellerOrder->lot?->title ?? 'Лот',
+                'buyer' => $latestSellerOrder->buyer?->username ?? 'Покупатель',
+            ] : null,
+            'chat_messages' => $chatMessages,
+        ]);
     }
 }

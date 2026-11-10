@@ -79,3 +79,7 @@ Route::post('/telegram/test', [TelegramController::class, 'sendTest'])->name('te
 Route::post('/telegram/webhook', [TelegramController::class, 'webhook'])->withoutMiddleware([\Illuminate\Foundation\Http\Middleware\ValidateCsrfToken::class])->name('telegram.webhook');
 
 Route::post('/telegram/preferences', [\App\Http\Controllers\TelegramController::class, 'updatePreferences'])->name('telegram.preferences');
+
+Route::post('/messages/send', [\App\Http\Controllers\ChatController::class, 'send'])->name('chat.send');
+
+Route::get('/messages/poll', [\App\Http\Controllers\ChatController::class, 'poll'])->name('chat.poll');
