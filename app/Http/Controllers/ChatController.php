@@ -17,6 +17,7 @@ class ChatController extends Controller
     public function index(Request $request): View
     {
         $user = $this->currentUser();
+        $user->markMessagesAsRead();
         $user->update(['last_seen_at' => now()]);
 
         $myOrders = Order::with(['lot', 'buyer', 'seller'])
@@ -85,6 +86,7 @@ class ChatController extends Controller
         $this->authorizeAction('view', $order);
 
         $user = $this->currentUser();
+        $user->markMessagesAsRead();
         $user->update(['last_seen_at' => now()]);
 
         $data = $request->validate([
@@ -122,6 +124,7 @@ class ChatController extends Controller
     public function send(Request $request): RedirectResponse|JsonResponse
     {
         $user = $this->currentUser();
+        $user->markMessagesAsRead();
         $user->update(['last_seen_at' => now()]);
 
         $data = $request->validate([
@@ -185,6 +188,7 @@ class ChatController extends Controller
     public function poll(Request $request): JsonResponse
     {
         $user = $this->currentUser();
+        $user->markMessagesAsRead();
         $partnerId = (int) $request->query('partner_id', 0);
         $afterId = (int) $request->query('after_id', 0);
 

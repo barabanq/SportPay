@@ -111,4 +111,43 @@ class User extends Authenticatable
 
         return Storage::disk('public')->url($this->avatar_path);
     }
+    public function markMessagesAsRead(): void
+    {
+        $myOrderIds = \App\Models\Order::where('buyer_id', $this->id)
+            ->orWhere('seller_id', $this->id)
+            ->pluck('id');
+
+        $maxId = $myOrderIds->isNotEmpty()
+            ? (int) \App\Models\Message::whereIn('order_id', $myOrderIds)->max('id')
+            : 0;
+
+        \Illuminate\Support\Facades\Cache::forever('sp_last_read_msg_' . $this->id, $maxId);
+        session(['sp_last_read_msg_' . $this->id => $maxId]);
+    }
+
+    public function unreadMessagesCount(): int
+    {
+        if (request()->routeIs('chat.*')) {
+            $this->markMessagesAsRead();
+            return 0;
+        }
+
+        $myOrderIds = \App\Models\Order::where('buyer_id', $this->id)
+            ->orWhere('seller_id', $this->id)
+            ->pluck('id');
+
+        if ($myOrderIds->isEmpty()) {
+            return 0;
+        }
+
+        $lastReadId = max(
+            (int) \Illuminate\Support\Facades\Cache::get('sp_last_read_msg_' . $this->id, 0),
+            (int) session('sp_last_read_msg_' . $this->id, 0)
+        );
+
+        return \App\Models\Message::whereIn('order_id', $myOrderIds)
+            ->where('user_id', '!=', $this->id)
+            ->where('id', '>', $lastReadId)
+            ->count();
+    }
 }

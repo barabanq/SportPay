@@ -24,6 +24,7 @@ class OrderController extends Controller
         $this->authorizeAction('view', $order);
 
         $user = $this->currentUser();
+        $user->markMessagesAsRead();
 
         $order->messages()
             ->where('user_id', '!=', $user->id)

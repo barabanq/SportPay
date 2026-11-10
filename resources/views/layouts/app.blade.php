@@ -136,6 +136,7 @@
         enabledTransports: ['ws', 'wss'],
     });
     </script>
+        <link rel="icon" type="image/png" href="/images/sportpay-bot-avatar.png?v=9">
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased">
 
@@ -144,7 +145,11 @@
         <div class="flex items-center justify-between gap-2">
             <div class="flex items-center gap-2 sm:gap-3">
                 <a href="{{ route('home') }}" class="text-xl sm:text-2xl font-extrabold tracking-tight text-emerald-400 flex items-center gap-1.5">
-                    <span>SPORT<span class="text-white">PAY</span></span>
+                    <span class="relative inline-flex items-center justify-center w-9 h-9 rounded-xl bg-slate-900 border border-emerald-500/40 shadow-[0_0_15px_rgba(16,185,129,0.45)] mr-2 shrink-0">
+    <img src="/images/sportpay-logo.svg" alt="SportPay" class="w-7 h-7">
+    <span class="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping"></span>
+    <span class="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+</span><span>SPORT<span class="text-white">PAY</span></span>
                     <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono uppercase">Vue 3</span>
                 </a>
 
@@ -166,7 +171,14 @@
 
                 <a href="{{ route('chat.index') }}" class="text-xs px-3 py-2 rounded-lg {{ request()->routeIs('chat.index') ? 'bg-slate-800 text-white font-bold' : 'text-slate-300 hover:bg-slate-800/60' }} transition flex items-center gap-1.5">
                     <span>💬 {{ __('Сообщения') }}</span>
-                    @if(!empty($unreadMessagesCount))
+                    @php
+    $__u = $currentUser ?? $user ?? null;
+    if ($__u && request()->routeIs('chat.*') && method_exists($__u, 'markMessagesAsRead')) {
+        $__u->markMessagesAsRead();
+    }
+    $unreadMessagesCount = ($__u && method_exists($__u, 'unreadMessagesCount')) ? $__u->unreadMessagesCount() : 0;
+@endphp
+@if(!empty($unreadMessagesCount))
                         <span class="px-1.5 py-0.5 text-[10px] font-extrabold rounded-full bg-rose-500 text-white">
                             +{{ $unreadMessagesCount }}
                         </span>
@@ -273,7 +285,14 @@
                 </a>
                 <a href="{{ route('chat.index') }}" class="px-3 py-2.5 rounded-xl {{ request()->routeIs('chat.index') ? 'bg-emerald-500 text-slate-950 font-extrabold' : 'bg-slate-800/80 text-slate-200 font-semibold' }} flex items-center justify-between">
                     <span>💬 {{ __('Сообщения') }}</span>
-                    @if(!empty($unreadMessagesCount))
+                    @php
+    $__u = $currentUser ?? $user ?? null;
+    if ($__u && request()->routeIs('chat.*') && method_exists($__u, 'markMessagesAsRead')) {
+        $__u->markMessagesAsRead();
+    }
+    $unreadMessagesCount = ($__u && method_exists($__u, 'unreadMessagesCount')) ? $__u->unreadMessagesCount() : 0;
+@endphp
+@if(!empty($unreadMessagesCount))
                         <span class="px-1.5 py-0.5 text-[10px] font-extrabold rounded-full bg-rose-500 text-white">+{{ $unreadMessagesCount }}</span>
                     @endif
                 </a>

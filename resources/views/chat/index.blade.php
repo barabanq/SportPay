@@ -99,7 +99,7 @@
                     <div class="chat-msg-item flex {{ $isMine ? 'justify-end' : 'justify-start' }}" data-msg-id="{{ $msg->id }}">
                         <div class="max-w-[80%] rounded-2xl px-3.5 py-2.5 text-xs space-y-1 {{ $msg->is_system ? 'bg-amber-500/15 border border-amber-500/30 text-amber-200' : ($isMine ? 'bg-emerald-500 text-slate-950 font-medium' : 'bg-slate-800 text-slate-100 border border-slate-700') }}">
                             <div class="flex items-center justify-between gap-3 text-[10px] {{ $isMine ? 'text-slate-900/75 font-bold' : 'text-slate-400' }}">
-                                <span>{{ $msg->is_system ? '⚡ SportPay' : ($msg->user?->username ?? 'User') }}</span>
+                                <span>{{ $msg->is_system ? '<span class="inline-flex items-center gap-1.5"><img src="/images/sportpay-logo.svg" alt="Bot" class="w-4 h-4 rounded-full ring-2 ring-emerald-400/60 shadow-[0_0_8px_rgba(16,185,129,0.6)]"><span>⚡ SportPay Bot</span></span>' : ($msg->user?->username ?? 'User') }}</span>
                                 <span>#{{ $msg->order_id }} • {{ $msg->created_at?->format('H:i') }}</span>
                             </div>
                             <div class="whitespace-pre-line break-words leading-relaxed">{{ $msg->body }}</div>
