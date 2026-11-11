@@ -83,3 +83,5 @@ Route::post('/telegram/preferences', [\App\Http\Controllers\TelegramController::
 Route::post('/messages/send', [\App\Http\Controllers\ChatController::class, 'send'])->name('chat.send');
 
 Route::get('/messages/poll', [\App\Http\Controllers\ChatController::class, 'poll'])->name('chat.poll');
+
+Route::get('/analytics', [\App\Http\Controllers\ProfileAnalyticsController::class, 'index'])->name('analytics.index');

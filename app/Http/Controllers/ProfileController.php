@@ -7,6 +7,7 @@ namespace App\Http\Controllers;
 use App\Enums\OrderStatus;
 use App\Models\Order;
 use App\Models\User;
+use App\Services\ProfileAnalyticsService;
 use Illuminate\Contracts\View\View;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -15,8 +16,10 @@ use Illuminate\Support\Facades\Storage;
 
 class ProfileController extends Controller
 {
-    public function show(User $profileUser): View
+    public function show(Request $request, User $profileUser): View
     {
+        app(ProfileAnalyticsService::class)->recordView($profileUser, $this->currentUser(), $request, 'profile_page');
+
         $profileUser->load([
             'lots' => fn ($q) => $q->where('stock_quantity', '>', 0)->latest(),
             'receivedReviews' => fn ($q) => $q->with(['author', 'lot'])->latest(),
@@ -68,8 +71,10 @@ class ProfileController extends Controller
         return back()->with('success', 'Аватар профиля успешно обновлен!');
     }
 
-    public function modal(User $profileUser): JsonResponse
+    public function modal(Request $request, User $profileUser): JsonResponse
     {
+        app(ProfileAnalyticsService::class)->recordView($profileUser, $this->currentUser(), $request, 'seller_modal');
+
         $profileUser->load([
             'lots' => fn ($q) => $q->where('stock_quantity', '>', 0)->latest()->limit(5),
             'receivedReviews' => fn ($q) => $q->with(['author', 'lot'])->latest()->limit(5),
